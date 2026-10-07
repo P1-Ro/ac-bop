@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acbop — sign in</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="brand" style="font-size:22px">ac<span>bop</span></div>
+  <form method="post" action="/login" style="display:flex;gap:8px">
+    <input type="password" name="password" placeholder="admin password" autofocus>
+    <button class="act primary" type="submit">Enter</button>
+  </form>
+  <div class="faint" id="msg"></div>
+</div>
+<script>
+  if (location.search.includes('bad=1')) document.getElementById('msg').textContent = 'Wrong password.';
+</script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acbop — Assetto Corsa adaptive BoP</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">ac<span>bop</span></div>
+  <nav>
+    <button data-tab="live" class="on">Live</button>
+    <button data-tab="drivers">Drivers</button>
+    <button data-tab="handicaps">Handicaps</button>
+    <button data-tab="laps">Laps</button>
+    <button data-tab="model">Model</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="conn">connecting…</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ================= LIVE ================= -->
+  <section class="tab on" id="tab-live">
+    <div class="cards">
+      <div class="card"><div class="k">Session</div><div class="v" id="s-type">—</div></div>
+      <div class="card"><div class="k">Track</div><div class="v" id="s-track">—</div></div>
+      <div class="card"><div class="k">Drivers</div><div class="v" id="s-drivers">0</div></div>
+      <div class="card"><div class="k">BoP active</div><div class="v" id="s-applies">—</div></div>
+    </div>
+
+    <div class="toolbar">
+      <button class="act primary" id="btn-recompute">Recompute now</button>
+      <button class="act" id="btn-apply">Re-apply to grid</button>
+      <span class="faint" id="recompute-msg"></span>
+    </div>
+
+    <h2>Grid</h2>
+    <table>
+      <thead><tr>
+        <th>#</th><th>Driver</th><th>Car</th>
+        <th class="num">Lap</th><th class="num">Last</th><th class="num">Best</th>
+        <th class="num">Ballast</th><th class="num">Restr.</th>
+        <th>State</th><th></th>
+      </tr></thead>
+      <tbody id="grid"><tr><td colspan="10" class="empty">Nobody on track</td></tr></tbody>
+    </table>
+
+    <h2>Activity</h2>
+    <div class="log" id="log"></div>
+  </section>
+
+  <!-- ================= DRIVERS ================= -->
+  <section class="tab" id="tab-drivers">
+    <p class="faint">Pace is this driver's average lap time relative to the field, with their
+    handicap mathematically removed. Negative = quicker than average. A driver who is
+    disabled keeps racing but is excluded from the model and gets no handicap.</p>
+    <table>
+      <thead><tr>
+        <th>Driver</th><th class="num">Pace</th><th class="num">Clean laps</th>
+        <th>Rated</th><th class="num">Last seen</th><th>In BoP</th>
+      </tr></thead>
+      <tbody id="drivers"></tbody>
+    </table>
+  </section>
+
+  <!-- ================= HANDICAPS ================= -->
+  <section class="tab" id="tab-handicaps">
+    <div class="toolbar">
+      <label class="faint">Track</label>
+      <select id="track-filter"><option value="">All tracks</option></select>
+      <span class="spacer"></span>
+      <span class="faint">Edit a value to pin it. Pinned rows are never auto-updated.</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Driver</th><th>Track</th><th>Car</th>
+        <th class="num">Ballast kg</th><th class="num">Restrictor %</th>
+        <th>Source</th><th></th>
+      </tr></thead>
+      <tbody id="handicaps"></tbody>
+    </table>
+  </section>
+
+  <!-- ================= LAPS ================= -->
+  <section class="tab" id="tab-laps">
+    <table>
+      <thead><tr>
+        <th>When</th><th>Driver</th><th>Track</th><th>Car</th>
+        <th class="num">Time</th><th class="num">Bal</th><th class="num">Res</th>
+        <th>Counted</th>
+      </tr></thead>
+      <tbody id="laps"></tbody>
+    </table>
+  </section>
+
+  <!-- ================= MODEL ================= -->
+  <section class="tab" id="tab-model">
+    <h2>Reference lap times</h2>
+    <p class="faint">What the model thinks an average driver with no handicap would lap in.
+    Used to give a newcomer a sensible number before they have run the track.</p>
+    <table>
+      <thead><tr><th>Track</th><th>Car</th><th class="num">Reference lap</th><th class="num">Laps</th></tr></thead>
+      <tbody id="trackcar"></tbody>
+    </table>
+
+    <h2>Learned handicap sensitivity</h2>
+    <p class="faint">How much lap time each car loses per unit of handicap, learned per track —
+    a restrictor costs far more on a power circuit than somewhere tight, which is why the same
+    driver carries different numbers at different tracks. Rows marked <em>all tracks</em> are the
+    car-wide average that a new track starts from.</p>
+    <table>
+      <thead><tr>
+        <th>Car</th><th>Track</th>
+        <th class="num">per 1% restrictor</th><th class="num">per 10 kg ballast</th>
+        <th class="num">Laps</th>
+      </tr></thead>
+      <tbody id="sens"></tbody>
+    </table>
+
+    <h2>Driver / track affinity</h2>
+    <p class="faint">Pace at a specific circuit beyond a driver's general level. Negative means
+    they go better there than usual, so they carry a little more. Shrunk hard toward zero, so only
+    a repeated, consistent pattern moves it.</p>
+    <table>
+      <thead><tr><th>Driver</th><th>Track</th><th class="num">Offset</th><th class="num">Laps</th></tr></thead>
+      <tbody id="affinity"></tbody>
+    </table>
+
+    <h2>Sessions</h2>
+    <table>
+      <thead><tr><th>Started</th><th>Track</th><th>Type</th><th class="num">Clean laps</th></tr></thead>
+      <tbody id="sessions"></tbody>
+    </table>
+  </section>
+
+  <!-- ================= SETTINGS ================= -->
+  <section class="tab" id="tab-settings">
+    <div class="toolbar">
+      <button class="act primary" id="btn-save">Save settings</button>
+      <span class="faint" id="save-msg"></span>
+    </div>
+    <div class="settings-grid" id="settings"></div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
