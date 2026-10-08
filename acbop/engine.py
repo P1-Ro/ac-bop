@@ -6,8 +6,10 @@ classification, handicap application and the VSC.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from . import protocol as p
@@ -45,11 +47,25 @@ class Driver:
     slow_since: float | None = None
     out_lap_pending: bool = True  # first flying lap after joining is an out-lap
 
+    # Track position unwrapped across the line, so the limiter can measure
+    # pace without caring when LAP_COMPLETED happens to arrive.
+    wraps: int = 0
+    trace: deque = field(default_factory=deque)  # (time, wraps + spline)
+    # Where along a lap this driver's time goes: (spline, fraction of lap
+    # time) from their last clean lap. Lets a slow hairpin and a long straight
+    # be told apart from the car genuinely running slow or fast.
+    lap_points: list = field(default_factory=list)  # (spline, time) this lap
+    lap_cross_t: float | None = None
+    pace_profile: list | None = None
+
     vsc_uses: int = 0
-    # Extra penalty currently imposed by an active VSC phase, on top of the
+    # Extra restrictor the safety car limiter is imposing on top of the
     # driver's normal handicap. Zero for the caller, who is unhandicapped.
     vsc_extra_restrictor: float = 0.0
-    vsc_extra_ballast: float = 0.0
+    # Lap time the limiter is holding this car to, 0 when not held.
+    vsc_target_ms: float = 0.0
+    # Measured fractional pace loss versus their own normal pace, live.
+    vsc_measured_slow: float | None = None
     # Set while this driver is the one who called the phase.
     vsc_is_caller: bool = False
 
@@ -58,12 +74,12 @@ class Driver:
         return self.laps_done + self.spline
 
     @property
+    def track_pos(self) -> float:
+        return self.wraps + self.spline
+
+    @property
     def in_vsc(self) -> bool:
-        return (
-            self.vsc_is_caller
-            or self.vsc_extra_restrictor > 0
-            or self.vsc_extra_ballast > 0
-        )
+        return self.vsc_is_caller or self.vsc_target_ms > 0
 
     def to_json(self) -> dict:
         return {
@@ -82,9 +98,14 @@ class Driver:
             "spline": round(self.spline, 4),
             "speed_kmh": round(self.speed_kmh, 1),
             "vsc_caller": self.vsc_is_caller,
-            "vsc_slowed": self.vsc_extra_restrictor > 0 or self.vsc_extra_ballast > 0,
+            "vsc_slowed": self.vsc_target_ms > 0,
             "vsc_extra_restrictor": round(self.vsc_extra_restrictor, 1),
-            "vsc_extra_ballast": round(self.vsc_extra_ballast),
+            "vsc_target_ms": round(self.vsc_target_ms),
+            "vsc_measured_pct": (
+                round(self.vsc_measured_slow * 100, 1)
+                if self.vsc_measured_slow is not None
+                else None
+            ),
             "vsc_uses": self.vsc_uses,
         }
 
@@ -110,6 +131,10 @@ class VscPhase:
     closed_early: bool = False
     peak_slow: float = 0.0        # strongest slowdown fraction applied so far
     last_gap_s: float = 0.0
+    last_tick: float = 0.0
+    # Live correction on top of each held car's model-estimated restrictor,
+    # in restrictor percent, keyed by car_id.
+    trims: dict = field(default_factory=dict)
 
     def ramp(self, now: float, ramp_s: float) -> float:
         """Ease in at the start and out as the deadline approaches."""
@@ -243,6 +268,7 @@ class Engine(asyncio.DatagramProtocol):
     # -- session ----------------------------------------------------------
 
     def on_session(self, s: p.SessionInfo) -> None:
+        new_track = self.session is None or s.track_key != self.session.track_key
         changed = (
             self.session is None
             or s.track_key != self.session.track_key
@@ -271,6 +297,12 @@ class Engine(asyncio.DatagramProtocol):
             d.vsc_uses = 0
             d.laps_done = 0
             d.out_lap_pending = True
+            # A lap profile describes one circuit; it is meaningless elsewhere.
+            d.trace.clear()
+            d.lap_points = []
+            d.lap_cross_t = None
+            if new_track:
+                d.pace_profile = None
         # re-apply after the server settles
         asyncio.get_event_loop().call_later(3.0, self.apply_all)
 
@@ -342,12 +374,13 @@ class Engine(asyncio.DatagramProtocol):
         d = self.drivers.get(u.car_id)
         if d is None:
             return
+        now = time.time()
+        self._trace(d, u.spline, now)
         d.spline = u.spline
         d.speed_kmh = u.speed_kmh
 
         # Crude pit detection: AC gives us no pit event over ACSP, so treat a
         # sustained stop as "the next lap is an out-lap".
-        now = time.time()
         if u.speed_kmh < 10.0:
             if d.slow_since is None:
                 d.slow_since = now
@@ -355,6 +388,68 @@ class Engine(asyncio.DatagramProtocol):
                 d.out_lap_pending = True
         else:
             d.slow_since = None
+
+    def _trace(self, d: Driver, spline: float, now: float) -> None:
+        """Record live position for the limiter and the lap profile."""
+        prev = d.spline
+        if d.trace:
+            if spline < prev - 0.5:
+                d.wraps += 1
+                self._close_profile_lap(d, prev, spline, now)
+            elif spline < prev - 0.02 or spline > prev + 0.25:
+                # Teleported (back to the pits, a reset): the running record
+                # no longer describes continuous driving.
+                d.trace.clear()
+                d.lap_points = []
+                d.lap_cross_t = None
+        d.trace.append((now, d.wraps + spline))
+        while d.trace and now - d.trace[0][0] > 60.0:
+            d.trace.popleft()
+        d.lap_points.append((spline, now))
+
+    def _close_profile_lap(self, d: Driver, prev: float, spline: float, now: float) -> None:
+        """At the line: turn the lap just driven into a pace profile, if clean."""
+        points = d.lap_points
+        d.lap_points = []
+        if not points:
+            d.lap_cross_t = None
+            return
+        # Interpolate the moment the car actually crossed the line.
+        t_prev = points[-1][1]
+        span = (spline + 1.0) - prev
+        t_cross = t_prev + ((1.0 - prev) / span) * (now - t_prev) if span > 0 else now
+        t0, d.lap_cross_t = d.lap_cross_t, t_cross
+        if t0 is None or len(points) < 8 or self.vsc is not None:
+            return
+        dur = t_cross - t0
+        if dur <= 0 or d.last_collision > t0:
+            return
+        if d.best_laptime_ms and not 0.9 < dur * 1000.0 / d.best_laptime_ms < 1.1:
+            return  # traffic, a spin or a pit stop: not a representative shape
+        profile = [(0.0, 0.0)]
+        for s, t in points:
+            f = (t - t0) / dur
+            if profile[-1][0] < s < 1.0 and profile[-1][1] < f < 1.0:
+                profile.append((s, f))
+        profile.append((1.0, 1.0))
+        if len(profile) >= 6:
+            d.pace_profile = profile
+
+    @staticmethod
+    def _lap_time_pos(d: Driver, pos: float) -> float:
+        """Unwrapped track position mapped to unwrapped laps of *time*."""
+        whole = int(pos // 1)
+        frac = pos - whole
+        prof = d.pace_profile
+        if not prof:
+            return pos
+        i = bisect.bisect_right(prof, (frac, float("inf")))
+        if i <= 0:
+            return whole
+        if i >= len(prof):
+            return whole + 1.0
+        (s0, f0), (s1, f1) = prof[i - 1], prof[i]
+        return whole + f0 + (f1 - f0) * ((frac - s0) / (s1 - s0) if s1 > s0 else 0.0)
 
     def on_client_event(self, e: p.ClientEvent) -> None:
         now = time.time()
@@ -455,9 +550,15 @@ class Engine(asyncio.DatagramProtocol):
                 else f"BoP: {b:.0f} kg ballast, {r:.0f}% restrictor.",
             )
 
-    def _push(self, d: Driver, r: float, b: float, force: bool = False) -> None:
+    def _push(self, d: Driver, r: float, b: float, force: bool = False,
+              deadband_r: float | None = None) -> None:
         """Send admin commands, respecting the deadband."""
-        if force or abs(r - d.restrictor) >= self.cfg.deadband_restrictor:
+        if deadband_r is None:
+            deadband_r = self.cfg.deadband_restrictor
+        # Always land exactly on zero, so a released car is not left carrying
+        # a sliver the deadband swallowed.
+        moved_r = abs(r - d.restrictor) >= deadband_r or (r == 0 and d.restrictor != 0)
+        if force or moved_r:
             self.admin(f"/restrictor {d.car_id} {r:.0f}")
             d.restrictor = r
         if force or abs(b - d.ballast) >= self.cfg.deadband_ballast:
@@ -524,10 +625,19 @@ class Engine(asyncio.DatagramProtocol):
         if not ahead:
             return None
         nearest = min(ahead, key=lambda o: o.progress - d.progress)
-        ref = self._lap_reference_ms(d)
+        return self._time_gap(d, nearest)
+
+    def _time_gap(self, behind: Driver, ahead: Driver) -> float | None:
+        """
+        Seconds `behind` needs to reach where `ahead` is now. Measured along
+        `behind`'s own lap profile when there is one, so a car in a slow hairpin
+        is not reported as closer than one on a long straight.
+        """
+        ref = self._lap_reference_ms(behind)
         if not ref:
             return None
-        return (nearest.progress - d.progress) * (ref / 1000.0)
+        laps = self._lap_time_pos(behind, ahead.progress) - self._lap_time_pos(behind, behind.progress)
+        return laps * (ref / 1000.0)
 
     def gap_to_leader_seconds(self, d: Driver) -> float | None:
         """Estimated gap from `d` back to the race leader, in seconds."""
@@ -537,10 +647,7 @@ class Engine(asyncio.DatagramProtocol):
         leader = max(others, key=lambda o: o.progress)
         if leader is d:
             return None
-        ref = self._lap_reference_ms(d)
-        if not ref:
-            return None
-        return (leader.progress - d.progress) * (ref / 1000.0)
+        return self._time_gap(d, leader)
 
     # -- safety car -------------------------------------------------------
 
@@ -585,7 +692,7 @@ class Engine(asyncio.DatagramProtocol):
             else f"up to {cfg.vsc_max_duration_s:.0f}s"
         )
         self.broadcast(
-            f"SAFETY CAR: {d.name} is {gap:.0f}s back. Cars ahead are held "
+            f"SAFETY CAR: {d.name} is {gap:.0f}s back. Cars ahead are pace-limited "
             f"until the gap is under {cfg.vsc_target_gap_s:.0f}s ({when})."
         )
         self.store.log(
@@ -639,14 +746,13 @@ class Engine(asyncio.DatagramProtocol):
 
     def _vsc_gap_to_caller(self, caller: Driver, other: Driver) -> float:
         """Seconds `other` is ahead of `caller`. Negative if behind."""
-        ref = self._lap_reference_ms(caller)
-        if not ref:
-            return 0.0
-        return (other.progress - caller.progress) * (ref / 1000.0)
+        return self._time_gap(caller, other) or 0.0
 
     def _vsc_slowdowns(self, caller: Driver) -> dict[int, float]:
         """
-        Fractional pace loss for every car, solved from live gaps.
+        How much slower than the caller's free pace each car is held, solved
+        from live gaps. 0.6 means that car is limited to 1.6x the caller's lap
+        time, whatever that car's own natural pace.
 
         The reference is the gap the caller actually has to close: the one to
         the car directly ahead, since that is what ends the phase. A car that
@@ -715,39 +821,47 @@ class Engine(asyncio.DatagramProtocol):
             return None
         return to_close / (slow / (1.0 + slow))
 
-    def _vsc_penalty(self, slowdown: float) -> tuple[float, float]:
-        """
-        Convert a wanted fractional pace loss into restrictor % and ballast kg,
-        using the learned sensitivity for this track and car.
+    def _own_pace_ms(self, d: Driver) -> float:
+        """A driver's normal lap time, carrying their normal handicap."""
+        return float(d.best_laptime_ms or self._lap_reference_ms() or 0.0)
 
-        Split proportionally to each channel's headroom so neither saturates
-        long before the other.
-        """
-        cfg = self.cfg
-        if slowdown <= 0:
-            return 0.0, 0.0
+    def _free_pace_ms(self, d: Driver) -> float:
+        """A driver's lap time with every handicap removed."""
         kr, kb = self._vsc_sensitivity()
+        own = self._own_pace_ms(d)
+        return own / (1.0 + kr * d.base_restrictor + kb * d.base_ballast / 10.0)
 
-        # What each channel could deliver on its own at full lock.
-        cap_r = kr * cfg.vsc_max_extra_restrictor
-        cap_b = kb * (cfg.vsc_max_extra_ballast / 10.0)
-        total = cap_r + cap_b
-        if total <= 0:
-            return 0.0, 0.0
-
-        share_r = cap_r / total
-        want_r = slowdown * share_r
-        want_b = slowdown * (1.0 - share_r)
-
-        r = want_r / kr if kr > 0 else 0.0
-        b = (want_b / kb) * 10.0 if kb > 0 else 0.0
-        return (
-            min(cfg.vsc_max_extra_restrictor, r),
-            min(cfg.vsc_max_extra_ballast, b),
-        )
+    def _measured_slowdown(self, d: Driver, pace_ms: float, since: float) -> float | None:
+        """
+        How much slower than `pace_ms` the car has actually run over the last
+        window, judged against that driver's own lap profile so the shape of
+        the circuit does not read as a pace change.
+        """
+        if pace_ms <= 0:
+            return None
+        window = max(1.0, self.cfg.vsc_pace_window_s)
+        now = time.time()
+        pts = [(t, x) for t, x in d.trace if t >= max(now - window, since)]
+        if len(pts) < 3:
+            return None
+        (t0, x0), (t1, x1) = pts[0], pts[-1]
+        if t1 - t0 < window * 0.5:
+            return None
+        expected = (self._lap_time_pos(d, x1) - self._lap_time_pos(d, x0)) * pace_ms / 1000.0
+        if expected <= 0:
+            return None
+        return (t1 - t0) / expected - 1.0
 
     def tick_vsc(self) -> None:
-        """Recompute the whole phase from live gaps. Called every tick."""
+        """
+        Recompute the whole phase from live gaps. Called every tick.
+
+        Each held car is limited to a target lap time with the restrictor
+        alone. The starting value is solved from the driver's own pace and the
+        learned sensitivity; a live correction then nudges it until their
+        measured pace matches the target, so a quick driver ends up carrying
+        more than a slow one and the restrictor's non-linearity is absorbed.
+        """
         phase = self.vsc
         if phase is None:
             return
@@ -776,25 +890,64 @@ class Engine(asyncio.DatagramProtocol):
             return
 
         ramp = phase.ramp(now, cfg.vsc_ramp_s)
+        dt = now - phase.last_tick if phase.last_tick else 0.0
+        phase.last_tick = now
 
         # The caller runs with no handicap at all.
         caller.vsc_extra_restrictor = 0.0
-        caller.vsc_extra_ballast = 0.0
+        caller.vsc_target_ms = 0.0
         self._push(caller, 0.0, 0.0)
 
-        slowdowns = self._vsc_slowdowns(caller)
+        kr, _ = self._vsc_sensitivity()
+        free_ms = self._free_pace_ms(caller)
+        holds = self._vsc_slowdowns(caller)
+        settled_since = phase.started + cfg.vsc_ramp_s
         for o in self.drivers.values():
             if o is caller or not o.loaded:
                 continue
-            slowdown = slowdowns.get(o.car_id, 0.0) * ramp
-            er, eb = self._vsc_penalty(slowdown)
-            o.vsc_extra_restrictor = er
-            o.vsc_extra_ballast = eb
-            phase.peak_slow = max(phase.peak_slow, slowdown)
-            # AC's own ceilings are 100% and 5000 kg.
-            r = min(100.0, o.base_restrictor + er)
-            b = min(5000.0, o.base_ballast + eb)
-            self._push(o, r, b)
+            hold = holds.get(o.car_id, 0.0)
+            own_ms = self._own_pace_ms(o)
+            if hold <= 0 or free_ms <= 0 or own_ms <= 0 or kr <= 0:
+                if o.vsc_target_ms or o.vsc_extra_restrictor:
+                    o.vsc_extra_restrictor = 0.0
+                    o.vsc_target_ms = 0.0
+                    o.vsc_measured_slow = None
+                    self._push(o, o.base_restrictor, o.base_ballast, force=True)
+                continue
+
+            target_ms = free_ms * (1.0 + hold)
+            # How much slower than their own normal pace this driver must run.
+            need = max(0.0, target_ms / own_ms - 1.0)
+            feed = need / kr
+            room = max(0.0, cfg.vsc_max_restrictor - o.base_restrictor)
+            trim = phase.trims.get(o.car_id, 0.0)
+
+            measured = (
+                self._measured_slowdown(o, own_ms, settled_since) if ramp >= 1.0 else None
+            )
+            o.vsc_measured_slow = measured
+            # Only correct on genuine running: a car parked in the gravel or
+            # crawling into the pits says nothing about the restrictor.
+            if (
+                measured is not None
+                and dt > 0
+                and cfg.vsc_limiter_gain > 0
+                and o.speed_kmh > 30.0
+                and measured < 3.0
+            ):
+                trim += cfg.vsc_limiter_gain * min(dt, 5.0) * (need - measured) / kr
+                trim = min(max(trim, -feed), room - feed)
+                phase.trims[o.car_id] = trim
+
+            extra = ramp * min(room, max(0.0, feed + trim))
+            o.vsc_extra_restrictor = extra
+            o.vsc_target_ms = target_ms
+            phase.peak_slow = max(phase.peak_slow, hold * ramp)
+            # Ballast is never touched: the hold is the restrictor alone.
+            self._push(
+                o, o.base_restrictor + extra, o.base_ballast,
+                deadband_r=max(cfg.deadband_restrictor, cfg.vsc_deadband_restrictor),
+            )
 
     def _end_vsc(self, why: str) -> None:
         phase = self.vsc
@@ -804,7 +957,8 @@ class Engine(asyncio.DatagramProtocol):
         for d in self.drivers.values():
             d.vsc_is_caller = False
             d.vsc_extra_restrictor = 0.0
-            d.vsc_extra_ballast = 0.0
+            d.vsc_target_ms = 0.0
+            d.vsc_measured_slow = None
             if d.loaded:
                 self._push(d, d.base_restrictor, d.base_ballast, force=True)
             # Lap times were meaningless during the phase; make the next one

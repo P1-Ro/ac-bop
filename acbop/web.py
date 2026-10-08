@@ -110,18 +110,20 @@ async def api_handicap_set(request: web.Request) -> web.Response:
     store: Store = request.app["store"]
     engine: Engine = request.app["engine"]
     b = await request.json()
-    store.set_handicap(
-        b["guid"],
-        b["track"],
-        b["car_model"],
-        float(b["restrictor"]),
-        float(b["ballast"]),
-        manual=bool(b.get("manual", True)),
-    )
+    try:
+        restrictor = float(b["restrictor"])
+        ballast = float(b["ballast"])
+        guid, track, car = b["guid"], b["track"], b["car_model"]
+    except (KeyError, TypeError, ValueError):
+        return web.json_response({"error": "restrictor and ballast must be numbers"}, status=400)
+    if not (0 <= restrictor <= 400) or not (0 <= ballast <= 5000):
+        return web.json_response(
+            {"error": "restrictor must be 0-400% and ballast 0-5000 kg"}, status=400
+        )
+    store.set_handicap(guid, track, car, restrictor, ballast, manual=bool(b.get("manual", True)))
     store.log(
         "info",
-        f"manual handicap {b['guid'][:8]} @ {b['track']}: "
-        f"{b['ballast']}kg / {b['restrictor']}%",
+        f"manual handicap {guid[:8]} @ {track}: {ballast:g}kg / {restrictor:g}%",
     )
     engine.apply_all()
     return web.json_response({"ok": True})
@@ -131,11 +133,12 @@ async def api_handicap_unpin(request: web.Request) -> web.Response:
     store: Store = request.app["store"]
     m = request.match_info
     row = store.get_handicap(m["guid"], m["track"], m["car"])
-    if row:
-        store.set_handicap(
-            m["guid"], m["track"], m["car"],
-            row["restrictor"], row["ballast"], manual=False,
-        )
+    if not row:
+        return web.json_response({"error": "no such handicap"}, status=404)
+    store.set_handicap(
+        m["guid"], m["track"], m["car"],
+        row["restrictor"], row["ballast"], manual=False,
+    )
     return web.json_response({"ok": True})
 
 
@@ -193,11 +196,14 @@ async def api_config_post(request: web.Request) -> web.Response:
     cfg: Config = request.app["cfg"]
     store: Store = request.app["store"]
     body = await request.json()
-    changed = cfg.apply_updates(body)
+    rejected: list[str] = []
+    changed = cfg.apply_updates(body, rejected)
     if changed:
         cfg.save(request.app["cfg_path"])
         store.log("info", f"settings changed: {', '.join(changed)}")
-    return web.json_response({"ok": True, "changed": changed, "config": cfg.to_dict()})
+    return web.json_response(
+        {"ok": not rejected, "changed": changed, "rejected": rejected, "config": cfg.to_dict()}
+    )
 
 
 async def api_vsc_grant(request: web.Request) -> web.Response:
