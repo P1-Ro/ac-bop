@@ -63,25 +63,79 @@ cap, the remainder spills into the other.
 - Old laps decay with a 60-day half-life, so improving drivers are not held back by
   last season's pace.
 
-### Lap filtering
+### Which laps count
 
-A lap only counts if it has no cuts, is not an out-lap, had no contact within 20 s, is
-inside `outlier_ratio` of that driver's personal best on the combination, and was not
-run under a catch-up boost. Then only the quickest `trim_fraction` of their laps are
-used, which kills traffic contamination.
+A lap is excluded outright if it has cuts, is an out-lap, had contact within 20 s, or
+was run during a safety car phase. Each reason gets its own colour on the Laps tab and
+the rejected laps are kept on purpose, so you can always see why the model ignored one.
 
-### The catch-up
+### Lap weighting
 
-Vanilla acServer has no safety car and no speed limiter, so a true VSC is not reachable
-without CSP on clients. Instead everyone carries a **floor** (default 6% / 25 kg), which
-leaves headroom to go *down*. Typing `!vsc` drops the caller to zero handicap for 45
-seconds — a real boost rather than a punishment for everyone else.
+Nothing clean is thrown away. Each lap carries two multiplied weights:
+
+- **recency** — exponential decay, 60-day half-life by default
+- **pace** — a lap at that driver's personal best on the combination weighs 1.0, and
+  every 2% of lap time above it halves the weight
+
+That second one is how traffic and lifting are handled *without* discarding the lap. A
+hard cut still applies for laps so slow they carry no pace information at all (20% off
+a personal best by default — a spin, a trip through the gravel).
+
+The optional `trim_fraction` hard trim is **off** by default. An earlier version set it
+to 0.5, which silently binned half of every driver's clean laps; the Live tab now shows
+a funnel accounting for every single recorded lap so nothing can go missing quietly.
+
+### The safety car
+
+Vanilla acServer has no safety car and no speed limiter, so this is built out of the
+handicap system. Everyone carries a **floor** (default 6% / 25 kg), which leaves
+headroom to go *down*.
+
+Typing `!vsc` starts a live phase:
+
+- the **caller** runs with no handicap at all
+- every car **ahead** is slowed well beyond its normal handicap, so the gap actually
+  closes
+- gaps are re-measured every second and the whole thing is recomputed from live
+  positions
+- it ends the moment the caller is within `vsc_target_gap_s` of the car ahead, or at the
+  hard time limit
+
+The amount of slowdown is **solved from physics, not guessed**. If a held car runs at
+(1 + s) times the caller's lap time, the caller gains `s/(1+s)` seconds per second of
+running. At the default `vsc_max_slowdown` of 0.6 that is 0.37 s/s, so a 20-second gap
+takes about 50 seconds to close. The ballast and restrictor needed for that slowdown
+come from the model's learned per-track sensitivity, which is why the numbers differ
+between Monza and Magione.
+
+This matters: a fixed 150 kg only costs about 9% of lap time, which would take three
+minutes to close a 20-second gap. The first version of this feature did exactly that and
+barely worked.
+
+Two modes:
+
+- **default** — every car at or beyond the gap the caller must close is held as hard as
+  allowed, giving the fastest possible catch-up
+- **`vsc_compress_pack`** — grade the hold by gap so the leaders bunch up too, more like
+  a real safety car, at the cost of the caller closing more slowly
 
 Refused if: they are leading, the car ahead is closer than `vsc_min_gap_s` (stops it
 becoming push-to-pass in a close fight), it is lap 1 or the final lap, they have already
-used it this race, or the session is not a race. Laps run under it never reach the model.
+used it this race, one is already running, or the session is not a race. Every lap run
+during a phase is excluded from the model, and the lap after it ends is treated as an
+out-lap.
 
-Other chat commands: `!bop` shows your current handicap, `!help` lists them.
+Other chat commands: `!bop` shows your handicap, `!gap` the gap ahead, `!help` lists them.
+
+### Recompute vs Re-apply
+
+Two buttons on the Live tab that do different things:
+
+- **Recompute now** refits the pace model from every recorded lap and rewrites all
+  stored handicaps. It does not touch cars already on track.
+- **Re-apply to grid** re-sends each driver on track the handicap currently stored for
+  them, without refitting anything. Use it after editing a value by hand, or if a car's
+  penalty looks out of step with what the Handicaps tab says.
 
 ---
 
@@ -178,15 +232,24 @@ maximum (unfair to a slow one).
 
 ## The GUI
 
-- **Live** — grid with lap times, current ballast and restrictor, catch-up state.
-  Recompute and re-apply on demand; `boost` grants a catch-up manually.
+- **Live** — grid with lap times, gaps, current ballast and restrictor, and safety car
+  state. A live banner tracks a running phase with a closure bar and an ETA, and can end
+  it early. Recompute and re-apply on demand; `safety car` starts a phase manually,
+  ignoring the per-race budget. After a recompute, a funnel accounts for every recorded
+  lap — nothing is dropped without being shown.
 - **Drivers** — pace relative to the field with the handicap removed. Toggle anyone out
   of the system entirely.
 - **Handicaps** — every driver × track × car. Edit a number to **pin** it; pinned rows
   are never auto-updated until you unpin.
-- **Laps** — every lap recorded, including rejected ones and why.
+- **Laps** — every lap recorded, with each rejection reason in its own colour. Click a
+  colour to filter.
 - **Model** — reference lap times, learned per-track sensitivity, driver/track affinity.
-- **Settings** — everything, with explanations. Connection settings need a restart.
+- **Settings** — every setting, each with a one-line description plus a tooltip
+  explaining what changing it will actually cause. Connection settings need a restart.
+
+The tables update in place rather than being rebuilt, so the page does not flicker,
+scroll position survives, and a value you are halfway through typing is never clobbered
+by a poll.
 
 ---
 
@@ -194,8 +257,8 @@ maximum (unfair to a slow one).
 
 ```bash
 python3 tests/test_convergence.py       # does the field actually converge
-python3 tests/test_vsc.py               # catch-up: grant, expiry, every refusal path
 python3 tests/test_track_variation.py   # per-track sensitivity and driver affinity
+python3 tests/test_safetycar.py         # does the caller actually catch the pack
 ```
 
 These spin up a fake AC server that speaks ACSP over a real UDP socket and drive the
@@ -210,6 +273,17 @@ race   spread%  P1-last%   handicaps (kg/%)
  raw     2.371      7.79
    1     0.707      2.11   Alien:120/25 Quick:120/20 ... Slow:25/6
    8     0.724      2.17   Alien:120/25 Quick:102/17 ... Slow:25/6
+```
+
+The safety car test simulates real running through a phase, with each car's speed set by
+whatever penalty it is carrying at that instant, and asserts the caller genuinely closes:
+
+```
+    t     gap   penalties (extra kg)
+  0.0   20.5s   +2500 +2500 +2500
+ 16.0   14.4s   +2500 +2500 +2500
+ 32.0    8.3s   +2500 +2500 +2500
+ gap 20.7s -> 2.9s in 46s of running   (predicted ETA was 47s)
 ```
 
 ---
@@ -239,7 +313,14 @@ to disable the term.
 
 **Admin penalties pop a notification** for the affected driver. The deadband settings
 stop acbop resending unchanged values, which keeps this to once per session per driver
-in normal running.
+in normal running. During a safety car the values change every tick by design, so the
+held drivers will see repeated notifications — raise `vsc_tick_s` if that bothers your
+group.
+
+**A held car is carrying thousands of kilos.** That is deliberate — it is the only way
+to make a car slow enough to act as a safety car — but it will feel absurd, and the car
+will understeer heavily. `vsc_max_slowdown` is the dial if your group finds it too much;
+lower is gentler but closes the gap more slowly, and the maths is in the tooltip.
 
 **Pit detection is approximate.** ACSP gives no pit event, so a sustained stop is
 treated as "the next lap is an out-lap". A driver who parks on track and rejoins loses

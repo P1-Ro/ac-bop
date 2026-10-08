@@ -129,9 +129,32 @@ def _decay_weight(ts: float, now: float, half_life_days: float) -> float:
     return 0.5 ** (age_days / half_life_days)
 
 
-def select_laps(store: Store, cfg: Config, now: float | None = None) -> list[Lap]:
-    """Pull clean laps, weight by recency, then trim per driver/track/car."""
+def select_laps(
+    store: Store,
+    cfg: Config,
+    now: float | None = None,
+    stats: dict | None = None,
+) -> list[Lap]:
+    """
+    Pull clean laps and weight them. Nothing is discarded except genuinely
+    broken laps.
+
+    A lap gets three multiplied weights:
+      * recency   — exponential decay, so old pace does not hold a driver back
+      * pace      — laps near that driver's personal best on the combination
+                    count fully, slower ones taper off. This is what handles
+                    traffic and lifting WITHOUT throwing the lap away.
+      * (optional) a hard trim, off by default.
+
+    Earlier versions hard-trimmed to the quickest 50%, which silently binned
+    half the data. Weighting keeps every lap's information while still
+    privileging representative ones.
+
+    `stats`, if given, is filled in with a funnel so the GUI can show exactly
+    what happened to every lap.
+    """
     now = now or time.time()
+    rows = store.clean_laps()
     raw = [
         Lap(
             guid=r["guid"],
@@ -143,7 +166,7 @@ def select_laps(store: Store, cfg: Config, now: float | None = None) -> list[Lap
             ts=r["ts"],
             weight=_decay_weight(r["ts"], now, cfg.half_life_days),
         )
-        for r in store.clean_laps()
+        for r in rows
     ]
 
     groups: dict[tuple[str, str, str], list[Lap]] = defaultdict(list)
@@ -151,14 +174,49 @@ def select_laps(store: Store, cfg: Config, now: float | None = None) -> list[Lap
         groups[(lap.guid, lap.track, lap.car)].append(lap)
 
     kept: list[Lap] = []
+    n_outlier = 0
+    n_trimmed = 0
+    downweighted = 0
+
     for laps in groups.values():
         laps.sort(key=lambda l: l.laptime_ms)
         best = laps[0].laptime_ms
-        # hard outlier cut first (traffic, spins, lifting)
-        laps = [l for l in laps if l.laptime_ms <= best * cfg.outlier_ratio]
-        # then keep the quickest fraction
-        n_keep = max(1, int(round(len(laps) * cfg.trim_fraction)))
-        kept.extend(laps[:n_keep])
+
+        # Hard cut only for laps so slow they carry no pace information at all
+        # (a spin, a trip through the gravel, a lap spent behind a wreck).
+        usable = [l for l in laps if l.laptime_ms <= best * cfg.outlier_ratio]
+        n_outlier += len(laps) - len(usable)
+
+        # Soft pace weight: 1.0 at a personal best, tapering as the lap slows.
+        for l in usable:
+            excess = (l.laptime_ms / best) - 1.0
+            if cfg.pace_weight_falloff > 0:
+                pw = 0.5 ** (excess / cfg.pace_weight_falloff)
+            else:
+                pw = 1.0
+            if pw < 0.95:
+                downweighted += 1
+            l.weight *= pw
+
+        # Optional hard trim, off by default (trim_fraction >= 1.0).
+        if cfg.trim_fraction < 1.0:
+            n_keep = max(1, int(round(len(usable) * cfg.trim_fraction)))
+            n_trimmed += len(usable) - n_keep
+            usable = usable[:n_keep]
+
+        kept.extend(usable)
+
+    if stats is not None:
+        stats.update(
+            {
+                "clean_laps": len(raw),
+                "dropped_outlier": n_outlier,
+                "dropped_trim": n_trimmed,
+                "downweighted": downweighted,
+                "used": len(kept),
+                "effective_weight": round(sum(l.weight for l in kept), 1),
+            }
+        )
     return kept
 
 
@@ -448,7 +506,8 @@ def solve_handicaps(
 
 def recompute_all(store: Store, cfg: Config) -> dict:
     """Full refit, then refresh the handicap cache for every known combination."""
-    laps = select_laps(store, cfg)
+    funnel: dict = {}
+    laps = select_laps(store, cfg, stats=funnel)
     res = fit(laps, cfg)
 
     for guid, s in res.skill.items():
@@ -492,6 +551,17 @@ def recompute_all(store: Store, cfg: Config) -> dict:
             store.set_handicap(h.guid, track, car, h.restrictor, h.ballast)
             updated += 1
 
+    # Everything the engine rejected before a lap ever reached the model,
+    # so the GUI can account for every lap in the database.
+    rejected = {
+        r["reason"]: r["n"]
+        for r in store.q(
+            "SELECT COALESCE(reason,'unknown') reason, COUNT(*) n FROM laps "
+            "WHERE clean=0 GROUP BY reason ORDER BY n DESC"
+        )
+    }
+    total = store.q1("SELECT COUNT(*) n FROM laps")["n"]
+
     return {
         "laps_used": res.laps_used,
         "drivers_rated": sum(
@@ -499,4 +569,9 @@ def recompute_all(store: Store, cfg: Config) -> dict:
         ),
         "combos": len(combos),
         "handicaps_updated": updated,
+        "funnel": {
+            "total_laps": total,
+            "rejected_by_engine": rejected,
+            **funnel,
+        },
     }

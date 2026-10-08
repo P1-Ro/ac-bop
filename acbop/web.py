@@ -199,14 +199,32 @@ async def api_config_post(request: web.Request) -> web.Response:
 
 
 async def api_vsc_grant(request: web.Request) -> web.Response:
-    """Admin override: hand a driver their catch-up from the GUI."""
+    """Admin override: start a safety car phase for this driver from the GUI."""
     engine: Engine = request.app["engine"]
+    store: Store = request.app["store"]
     car_id = int(request.match_info["car_id"])
     d = engine.drivers.get(car_id)
     if d is None:
         return web.json_response({"error": "no such car"}, status=404)
+    if engine.vsc is not None:
+        return web.json_response({"error": "a phase is already running"}, status=409)
+    # An admin override ignores the per-race budget.
     d.vsc_uses = 0
+    if engine.session_id is not None:
+        store.x(
+            "DELETE FROM vsc_used WHERE session_id=? AND guid=?",
+            (engine.session_id, d.guid),
+        )
     engine.handle_vsc(car_id)
+    return web.json_response({"ok": True, "started": engine.vsc is not None})
+
+
+async def api_vsc_end(request: web.Request) -> web.Response:
+    """Stop an active phase early."""
+    engine: Engine = request.app["engine"]
+    if engine.vsc is None:
+        return web.json_response({"error": "no phase running"}, status=404)
+    engine._end_vsc("stopped by an admin")
     return web.json_response({"ok": True})
 
 
@@ -244,6 +262,7 @@ def build_app(cfg: Config, store: Store, engine: Engine, cfg_path: str) -> web.A
             web.get("/api/config", api_config_get),
             web.post("/api/config", api_config_post),
             web.post("/api/vsc/{car_id}", api_vsc_grant),
+            web.delete("/api/vsc", api_vsc_end),
             web.get("/api/events", api_events),
             web.static("/static", STATIC),
         ]

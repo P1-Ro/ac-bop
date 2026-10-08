@@ -57,8 +57,20 @@ class Config:
     # --- lap filtering ----------------------------------------------------
     drop_cut_laps: bool = True
     collision_cooldown_s: float = 20.0  # ignore laps within N s of a contact
-    trim_fraction: float = 0.5          # keep the best X of a driver's laps
-    outlier_ratio: float = 1.25         # drop laps slower than X * personal best
+    # Hard outlier cut: a lap slower than this multiple of the driver's best on
+    # the combination carries no pace information (spin, gravel, stuck behind a
+    # wreck) and is dropped outright.
+    outlier_ratio: float = 1.20
+    # Soft pace weighting. A lap at a personal best weighs 1.0; every
+    # `pace_weight_falloff` of fractional lap time above it halves the weight.
+    # 0.02 means a lap 2% off their best counts half, 4% off counts a quarter.
+    # This handles traffic without discarding the lap. Set 0 to weight all
+    # usable laps equally.
+    pace_weight_falloff: float = 0.02
+    # Optional hard trim to the quickest fraction of a driver's laps.
+    # 1.0 = off, which is the default: the pace weighting above does this job
+    # better, because it keeps the information instead of binning it.
+    trim_fraction: float = 1.0
 
     # --- car sensitivity priors ------------------------------------------
     # Fractional laptime loss per 1% restrictor, and per 10 kg ballast.
@@ -75,15 +87,43 @@ class Config:
     affinity_prior_weight: float = 25.0
     max_affinity: float = 0.015  # +/- 1.5% of lap time
 
-    # --- VSC --------------------------------------------------------------
+    # --- VSC / safety car -------------------------------------------------
+    # A VSC is a live phase, not a one-shot boost. The caller is unhandicapped
+    # and everyone AHEAD of them is slowed in proportion to how far ahead they
+    # are, so the field genuinely compresses. Recomputed every tick from live
+    # gaps, and it ends as soon as the caller has closed to the target gap.
     vsc_enabled: bool = True
     vsc_command: str = "!vsc"
-    vsc_duration_s: float = 45.0
-    vsc_min_gap_s: float = 8.0      # must be this far behind the car ahead
-    vsc_min_lap: int = 2            # not on the opening lap
+    vsc_max_duration_s: float = 120.0  # hard ceiling even if the gap never closes
+    vsc_target_gap_s: float = 3.0      # phase ends once this close to the car ahead
+    vsc_min_gap_s: float = 8.0         # must be this far behind to call it
+    vsc_min_lap: int = 2               # not on the opening lap
     vsc_forbid_final_lap: bool = True
-    vsc_per_session: int = 1        # uses per driver per session
+    vsc_per_session: int = 1           # uses per driver per session
     vsc_race_only: bool = True
+    vsc_tick_s: float = 1.0            # how often gaps and penalties are redone
+
+    # How much slower the cars being held are made to run, as a fraction of
+    # their own pace. 0.6 means they lap 60% slower, which closes roughly
+    # 0.37 s of gap per second of running — a 20 s gap takes about 50 s. This
+    # is the main lever on how fast the field comes back together. Pushing it
+    # much past 0.6 makes the cars genuinely unpleasant to drive.
+    vsc_max_slowdown: float = 0.60
+    # The penalty needed for that slowdown is solved from the learned per-track
+    # sensitivity, bounded by these. AC's own ceilings are 100% and 5000 kg.
+    vsc_max_extra_restrictor: float = 100.0
+    vsc_max_extra_ballast: float = 2500.0
+    # Grade the slowdown so cars further ahead are held harder, which bunches
+    # the leaders together as well — more like a real safety car, but the
+    # caller closes more slowly because the car directly ahead of them is held
+    # less. Off by default: closing the caller's own gap is the point.
+    vsc_compress_pack: bool = False
+    # Drivers already behind the caller are left alone by default. Turn this on
+    # to slow the whole field instead, which keeps relative order behind intact.
+    vsc_slow_whole_field: bool = False
+    # Ease the penalty in and out over this long, so nobody is hit with 150 kg
+    # between one corner and the next.
+    vsc_ramp_s: float = 3.0
 
     # --- behaviour --------------------------------------------------------
     apply_in_practice: bool = True

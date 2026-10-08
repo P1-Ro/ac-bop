@@ -28,7 +28,9 @@ sys.path.insert(0, str(HERE / "tests"))
 sys.path.insert(0, str(HERE))
 
 import simserver  # noqa: E402
-from simserver import SimDriver, SimServer, p_car_update, p_chat  # noqa: E402
+from simserver import (  # noqa: E402
+    SimDriver, SimServer, p_car_update, p_chat, p_client_event, p_lap_completed,
+)
 
 # Three circuits with deliberately different character, so you can see the
 # per-track sensitivity diverge: a power track where the restrictor bites, a
@@ -127,22 +129,37 @@ async def main() -> int:
     # Leave a race running so the Live tab is populated.
     print("\nLeaving a race on track at Monza...")
     await srv.run_session("monza", 105_000.0, n_laps=6, declared_laps=30)
-    for cid, spline in ((0, 0.82), (1, 0.41), (2, 0.77), (3, 0.30), (4, 0.88), (5, 0.22)):
+
+    # Spread the field out so the last driver is genuinely adrift, then show a
+    # contact and a safety car so the Laps tab has every rejection colour in it.
+    for cid, spline in ((0, 0.92), (1, 0.74), (2, 0.58), (3, 0.42), (4, 0.28), (5, 0.06)):
         srv.send(p_car_update(cid, spline, 185.0))
     await srv.pump(0.4)
 
-    srv.send(p_chat(5, "!vsc"))   # the backmarker takes their catch-up
-    await srv.pump(0.6)
-    boost = [m for m in srv.chat_to_drivers if "CATCH-UP" in m]
-    print("catch-up:", boost[-1] if boost else "(refused — check the Live tab)")
+    srv.send(p_client_event(2, 3))                 # a collision
+    await srv.pump(0.2)
+    srv.send(p_lap_completed(2, 106_000, 0, []))   # -> rejected as "contact"
+    await srv.pump(0.3)
+
+    srv.send(p_chat(5, "!vsc"))                    # the backmarker calls one
+    await srv.pump(0.8)
+    called = [m for m in srv.chat_to_drivers if "SAFETY CAR" in m]
+    print("safety car:", called[-1] if called else "(refused — check the Live tab)")
+
+    for cid in (0, 1, 2):                          # laps run under it
+        srv.send(p_lap_completed(cid, 150_000, 0, []))
+    await srv.pump(0.5)
 
     print("\nWhat to look at:")
-    print(f"  Live       http://127.0.0.1:{web_port}/        grid, ballast/restrictor, boost")
-    print("  Drivers    pace per driver, with the handicap mathematically removed")
+    print(f"  Live       http://127.0.0.1:{web_port}/")
+    print("             the safety car banner, who is being held and by how much,")
+    print("             and the funnel showing where every recorded lap went")
     print("  Handicaps  same driver, different numbers per track")
     print("  Model      learned per-track sensitivity and driver/track affinity")
-    print("  Laps       every lap, including rejected ones and why")
-    print("\nThe grid stays connected until you restart acbop.")
+    print("  Laps       every rejection reason in its own colour — click to filter")
+    print("\nThe phase ends on its own; the cars are parked, so it will run to the")
+    print("time limit rather than closing the gap. The grid stays connected until")
+    print("you restart acbop.")
     return 0
 
 

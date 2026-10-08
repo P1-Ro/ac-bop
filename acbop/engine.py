@@ -45,12 +45,25 @@ class Driver:
     slow_since: float | None = None
     out_lap_pending: bool = True  # first flying lap after joining is an out-lap
 
-    vsc_until: float | None = None
     vsc_uses: int = 0
+    # Extra penalty currently imposed by an active VSC phase, on top of the
+    # driver's normal handicap. Zero for the caller, who is unhandicapped.
+    vsc_extra_restrictor: float = 0.0
+    vsc_extra_ballast: float = 0.0
+    # Set while this driver is the one who called the phase.
+    vsc_is_caller: bool = False
 
     @property
     def progress(self) -> float:
         return self.laps_done + self.spline
+
+    @property
+    def in_vsc(self) -> bool:
+        return (
+            self.vsc_is_caller
+            or self.vsc_extra_restrictor > 0
+            or self.vsc_extra_ballast > 0
+        )
 
     def to_json(self) -> dict:
         return {
@@ -68,11 +81,73 @@ class Driver:
             "best_laptime_ms": self.best_laptime_ms,
             "spline": round(self.spline, 4),
             "speed_kmh": round(self.speed_kmh, 1),
-            "vsc_active": self.vsc_until is not None,
-            "vsc_remaining": (
-                round(self.vsc_until - time.time(), 1) if self.vsc_until else 0
-            ),
+            "vsc_caller": self.vsc_is_caller,
+            "vsc_slowed": self.vsc_extra_restrictor > 0 or self.vsc_extra_ballast > 0,
+            "vsc_extra_restrictor": round(self.vsc_extra_restrictor, 1),
+            "vsc_extra_ballast": round(self.vsc_extra_ballast),
             "vsc_uses": self.vsc_uses,
+        }
+
+
+@dataclass
+class VscPhase:
+    """
+    A live safety-car phase.
+
+    The caller runs unhandicapped while everyone ahead is slowed in proportion
+    to their gap, so the field concertinas instead of being teleported
+    together. Recomputed every tick from live gaps and ended as soon as the
+    caller has closed up, or at the hard time limit.
+    """
+
+    caller_guid: str
+    caller_car_id: int
+    started: float
+    deadline: float
+    start_gap_s: float
+    target_gap_s: float
+
+    closed_early: bool = False
+    peak_slow: float = 0.0        # strongest slowdown fraction applied so far
+    last_gap_s: float = 0.0
+
+    def ramp(self, now: float, ramp_s: float) -> float:
+        """Ease in at the start and out as the deadline approaches."""
+        if ramp_s <= 0:
+            return 1.0
+        rise = min(1.0, (now - self.started) / ramp_s)
+        fall = min(1.0, max(0.0, (self.deadline - now) / ramp_s))
+        return max(0.0, min(rise, fall))
+
+    @property
+    def elapsed(self) -> float:
+        return time.time() - self.started
+
+    def to_json(self) -> dict:
+        now = time.time()
+        return {
+            "caller_guid": self.caller_guid,
+            "caller_car_id": self.caller_car_id,
+            "elapsed": round(now - self.started, 1),
+            "remaining": round(max(0.0, self.deadline - now), 1),
+            "start_gap_s": round(self.start_gap_s, 1),
+            "gap_s": round(self.last_gap_s, 1),
+            "target_gap_s": round(self.target_gap_s, 1),
+            "closed_pct": (
+                round(
+                    max(
+                        0.0,
+                        min(
+                            100.0,
+                            (self.start_gap_s - self.last_gap_s)
+                            / max(0.001, self.start_gap_s - self.target_gap_s)
+                            * 100,
+                        ),
+                    )
+                )
+                if self.start_gap_s > self.target_gap_s
+                else 100
+            ),
         }
 
 
@@ -94,6 +169,9 @@ class Engine(asyncio.DatagramProtocol):
         self.last_packet_ts = 0.0
         self.packet_counts: dict[str, int] = {}
         self._pending_recompute = False
+
+        # The live VSC phase, or None. One at a time.
+        self.vsc: VscPhase | None = None
 
     # -- transport --------------------------------------------------------
 
@@ -329,8 +407,10 @@ class Engine(asyncio.DatagramProtocol):
             return f"{lap.cuts} cut(s)"
         if d.out_lap_pending:
             return "out lap"
-        if d.vsc_until is not None:
-            return "VSC active"
+        if self.vsc is not None or d.in_vsc:
+            # Nobody's lap time means anything during a safety car, whether
+            # they were boosted, slowed, or merely stuck behind someone slowed.
+            return "safety car"
         if time.time() - d.last_collision < self.cfg.collision_cooldown_s:
             return "contact"
         return None
@@ -361,8 +441,8 @@ class Engine(asyncio.DatagramProtocol):
         r, b = self.target_for(d)
         d.base_restrictor, d.base_ballast = r, b
 
-        if d.vsc_until is not None:
-            return  # VSC owns the values until it expires
+        if self.vsc is not None:
+            return  # the live phase owns the values until it ends
 
         self._push(d, r, b)
 
@@ -370,7 +450,7 @@ class Engine(asyncio.DatagramProtocol):
             self.whisper(
                 d.car_id,
                 f"BoP: {b:.0f} kg ballast, {r:.0f}% restrictor. "
-                f"Type {self.cfg.vsc_command} once per race to catch up."
+                f"Type {self.cfg.vsc_command} once per race to bring out a safety car."
                 if self.cfg.vsc_enabled
                 else f"BoP: {b:.0f} kg ballast, {r:.0f}% restrictor.",
             )
@@ -409,27 +489,60 @@ class Engine(asyncio.DatagramProtocol):
                     c.car_id,
                     f"Your BoP: {d.base_ballast:.0f} kg / {d.base_restrictor:.0f}%",
                 )
+        elif low in ("!gap", "!gaps"):
+            d = self.drivers.get(c.car_id)
+            if d:
+                g = self.gap_ahead_seconds(d)
+                self.whisper(
+                    c.car_id,
+                    f"Gap to car ahead: {g:.1f}s" if g is not None else "You are leading.",
+                )
         elif low == "!help":
             self.whisper(
                 c.car_id,
-                f"{self.cfg.vsc_command} = catch-up boost (once per race) | "
-                f"!bop = show your handicap",
+                f"{self.cfg.vsc_command} = call a safety car to close up "
+                f"(once per race) | !bop = your handicap | !gap = gap ahead",
             )
 
+    def _lap_reference_ms(self, d: Driver | None = None) -> float:
+        """A lap time to convert track-position deltas into seconds."""
+        if d is not None and (d.best_laptime_ms or d.last_laptime_ms):
+            return float(d.best_laptime_ms or d.last_laptime_ms)
+        times = [
+            o.best_laptime_ms or o.last_laptime_ms
+            for o in self.drivers.values()
+            if o.best_laptime_ms or o.last_laptime_ms
+        ]
+        return float(min(times)) if times else 0.0
+
     def gap_ahead_seconds(self, d: Driver) -> float | None:
-        """Estimated gap to the car in front, in seconds."""
-        others = [o for o in self.drivers.values() if o is not d and o.loaded]
-        ahead = [o for o in others if o.progress > d.progress]
+        """Estimated gap to the car directly in front, in seconds."""
+        ahead = [
+            o for o in self.drivers.values()
+            if o is not d and o.loaded and o.progress > d.progress
+        ]
         if not ahead:
             return None
         nearest = min(ahead, key=lambda o: o.progress - d.progress)
-        delta_laps = nearest.progress - d.progress
-        ref = d.best_laptime_ms or d.last_laptime_ms
-        if not ref:
-            ref = min((o.best_laptime_ms for o in others if o.best_laptime_ms), default=0)
+        ref = self._lap_reference_ms(d)
         if not ref:
             return None
-        return delta_laps * (ref / 1000.0)
+        return (nearest.progress - d.progress) * (ref / 1000.0)
+
+    def gap_to_leader_seconds(self, d: Driver) -> float | None:
+        """Estimated gap from `d` back to the race leader, in seconds."""
+        others = [o for o in self.drivers.values() if o.loaded]
+        if not others:
+            return None
+        leader = max(others, key=lambda o: o.progress)
+        if leader is d:
+            return None
+        ref = self._lap_reference_ms(d)
+        if not ref:
+            return None
+        return (leader.progress - d.progress) * (ref / 1000.0)
+
+    # -- safety car -------------------------------------------------------
 
     def handle_vsc(self, car_id: int) -> None:
         d = self.drivers.get(car_id)
@@ -437,20 +550,44 @@ class Engine(asyncio.DatagramProtocol):
             return
         reason = self._vsc_refusal(d)
         if reason:
-            self.whisper(car_id, f"Catch-up unavailable: {reason}")
+            self.whisper(car_id, f"Safety car unavailable: {reason}")
             return
+
+        cfg = self.cfg
+        now = time.time()
+        gap = self.gap_ahead_seconds(d) or 0.0
 
         d.vsc_uses += 1
         if self.session_id is not None:
             self.store.vsc_mark_used(self.session_id, d.guid)
-        d.vsc_until = time.time() + self.cfg.vsc_duration_s
 
-        self._push(d, 0.0, 0.0, force=True)
-        self.broadcast(
-            f"CATCH-UP: {d.name} runs clean for {self.cfg.vsc_duration_s:.0f}s"
+        self.vsc = VscPhase(
+            caller_guid=d.guid,
+            caller_car_id=d.car_id,
+            started=now,
+            deadline=now + cfg.vsc_max_duration_s,
+            start_gap_s=gap,
+            target_gap_s=cfg.vsc_target_gap_s,
+            last_gap_s=gap,
         )
-        self.store.log("info", f"VSC used by {d.name}")
-        log.info("VSC: %s for %.0fs", d.name, self.cfg.vsc_duration_s)
+        d.vsc_is_caller = True
+
+        eta = self.vsc_closure_eta(d)
+        when = (
+            f"~{min(eta, cfg.vsc_max_duration_s):.0f}s"
+            if eta is not None
+            else f"up to {cfg.vsc_max_duration_s:.0f}s"
+        )
+        self.broadcast(
+            f"SAFETY CAR: {d.name} is {gap:.0f}s back. Cars ahead are held "
+            f"until the gap is under {cfg.vsc_target_gap_s:.0f}s ({when})."
+        )
+        self.store.log(
+            "info",
+            f"safety car called by {d.name}, {gap:.1f}s behind, eta {when}",
+        )
+        log.info("VSC phase: caller=%s gap=%.1fs eta=%s", d.name, gap, when)
+        self.tick_vsc()  # apply immediately rather than waiting a tick
 
     def _vsc_refusal(self, d: Driver) -> str | None:
         cfg = self.cfg
@@ -460,8 +597,8 @@ class Engine(asyncio.DatagramProtocol):
             return "no session"
         if cfg.vsc_race_only and self.session.type_name != "race":
             return "race sessions only"
-        if d.vsc_until is not None:
-            return "already active"
+        if self.vsc is not None:
+            return "one is already running"
         if d.vsc_uses >= cfg.vsc_per_session:
             return "already used this race"
         if self.session_id is not None and self.store.vsc_was_used(self.session_id, d.guid):
@@ -478,20 +615,205 @@ class Engine(asyncio.DatagramProtocol):
             return f"gap is only {gap:.1f}s (need {cfg.vsc_min_gap_s:.0f}s)"
         return None
 
+    def _vsc_sensitivity(self) -> tuple[float, float]:
+        """Learned laptime cost per 1% restrictor and per 10 kg, for this track."""
+        kr, kb = self.cfg.prior_k_restrictor, self.cfg.prior_k_ballast
+        if self.session is None:
+            return kr, kb
+        track = self.session.track_key
+        cars = [d.car_model for d in self.drivers.values()]
+        sens = self.store.car_sensitivities()
+        for car in cars:
+            row = sens.get((track, car)) or sens.get(("", car))
+            if row and row["k_restrictor"] and row["k_ballast"]:
+                return float(row["k_restrictor"]), float(row["k_ballast"])
+        return kr, kb
+
+    def _vsc_gap_to_caller(self, caller: Driver, other: Driver) -> float:
+        """Seconds `other` is ahead of `caller`. Negative if behind."""
+        ref = self._lap_reference_ms(caller)
+        if not ref:
+            return 0.0
+        return (other.progress - caller.progress) * (ref / 1000.0)
+
+    def _vsc_slowdowns(self, caller: Driver) -> dict[int, float]:
+        """
+        Fractional pace loss for every car, solved from live gaps.
+
+        The reference is the gap the caller actually has to close: the one to
+        the car directly ahead, since that is what ends the phase. A car that
+        far ahead or further is slowed as hard as allowed, so the caller closes
+        at the maximum rate. Cars nearer than the reference — which only
+        happens in whole-field mode, or mid-phase as the order shuffles — are
+        slowed pro rata, so they are not punished for being close by.
+
+        Anchoring on the leader instead would be wrong: a leader a lap and a
+        half up would dilute everyone else's penalty to nothing and the caller
+        would never catch the car in front of them.
+        """
+        cfg = self.cfg
+        gaps: dict[int, float] = {}
+        for o in self.drivers.values():
+            if o is caller or not o.loaded:
+                continue
+            gap = self._vsc_gap_to_caller(caller, o)
+            if gap <= 0 and not cfg.vsc_slow_whole_field:
+                continue
+            gaps[o.car_id] = abs(gap)
+        if not gaps:
+            return {}
+
+        if cfg.vsc_compress_pack:
+            # Grade against the biggest gap in the field, so the leader is held
+            # hardest and the pack bunches. Costs closure rate for the caller.
+            reference = max(gaps.values())
+        else:
+            ahead = [
+                g for cid, g in gaps.items()
+                if self._vsc_gap_to_caller(caller, self.drivers[cid]) > 0
+            ]
+            reference = min(ahead) if ahead else max(gaps.values())
+        # Never reference a gap so small the whole phase is pointless.
+        reference = max(reference, cfg.vsc_target_gap_s, 0.5)
+
+        return {
+            cid: cfg.vsc_max_slowdown * min(1.0, g / reference)
+            for cid, g in gaps.items()
+        }
+
+    def vsc_closure_eta(self, caller: Driver) -> float | None:
+        """
+        Seconds of running needed to bring the caller to the target gap, at the
+        current slowdown. Physics, not a guess: if the car ahead runs at
+        (1 + s) times the caller's lap time, the caller gains s/(1+s) seconds
+        for every second of running.
+        """
+        gap = self.gap_ahead_seconds(caller)
+        if gap is None:
+            return None
+        to_close = gap - self.cfg.vsc_target_gap_s
+        if to_close <= 0:
+            return 0.0
+        s = self._vsc_slowdowns(caller)
+        ahead = [
+            o for o in self.drivers.values()
+            if o.loaded and o is not caller and o.progress > caller.progress
+        ]
+        if not ahead:
+            return None
+        nearest = min(ahead, key=lambda o: o.progress - caller.progress)
+        slow = s.get(nearest.car_id, 0.0)
+        if slow <= 0:
+            return None
+        return to_close / (slow / (1.0 + slow))
+
+    def _vsc_penalty(self, slowdown: float) -> tuple[float, float]:
+        """
+        Convert a wanted fractional pace loss into restrictor % and ballast kg,
+        using the learned sensitivity for this track and car.
+
+        Split proportionally to each channel's headroom so neither saturates
+        long before the other.
+        """
+        cfg = self.cfg
+        if slowdown <= 0:
+            return 0.0, 0.0
+        kr, kb = self._vsc_sensitivity()
+
+        # What each channel could deliver on its own at full lock.
+        cap_r = kr * cfg.vsc_max_extra_restrictor
+        cap_b = kb * (cfg.vsc_max_extra_ballast / 10.0)
+        total = cap_r + cap_b
+        if total <= 0:
+            return 0.0, 0.0
+
+        share_r = cap_r / total
+        want_r = slowdown * share_r
+        want_b = slowdown * (1.0 - share_r)
+
+        r = want_r / kr if kr > 0 else 0.0
+        b = (want_b / kb) * 10.0 if kb > 0 else 0.0
+        return (
+            min(cfg.vsc_max_extra_restrictor, r),
+            min(cfg.vsc_max_extra_ballast, b),
+        )
+
     def tick_vsc(self) -> None:
+        """Recompute the whole phase from live gaps. Called every tick."""
+        phase = self.vsc
+        if phase is None:
+            return
+
+        cfg = self.cfg
         now = time.time()
+        caller = self.drivers.get(phase.caller_car_id)
+
+        # Caller gone (disconnected or slot reused) — abandon the phase.
+        if caller is None or caller.guid != phase.caller_guid:
+            self._end_vsc("caller left")
+            return
+
+        gap = self.gap_ahead_seconds(caller)
+        phase.last_gap_s = gap if gap is not None else 0.0
+
+        if gap is None:
+            self._end_vsc(f"{caller.name} is now leading")
+            return
+        if gap <= phase.target_gap_s:
+            phase.closed_early = True
+            self._end_vsc(f"{caller.name} has closed to {gap:.1f}s")
+            return
+        if now >= phase.deadline:
+            self._end_vsc(f"time limit reached, gap {gap:.1f}s")
+            return
+
+        ramp = phase.ramp(now, cfg.vsc_ramp_s)
+
+        # The caller runs with no handicap at all.
+        caller.vsc_extra_restrictor = 0.0
+        caller.vsc_extra_ballast = 0.0
+        self._push(caller, 0.0, 0.0)
+
+        slowdowns = self._vsc_slowdowns(caller)
+        for o in self.drivers.values():
+            if o is caller or not o.loaded:
+                continue
+            slowdown = slowdowns.get(o.car_id, 0.0) * ramp
+            er, eb = self._vsc_penalty(slowdown)
+            o.vsc_extra_restrictor = er
+            o.vsc_extra_ballast = eb
+            phase.peak_slow = max(phase.peak_slow, slowdown)
+            # AC's own ceilings are 100% and 5000 kg.
+            r = min(100.0, o.base_restrictor + er)
+            b = min(5000.0, o.base_ballast + eb)
+            self._push(o, r, b)
+
+    def _end_vsc(self, why: str) -> None:
+        phase = self.vsc
+        self.vsc = None
+        if phase is None:
+            return
         for d in self.drivers.values():
-            if d.vsc_until is not None and now >= d.vsc_until:
-                d.vsc_until = None
+            d.vsc_is_caller = False
+            d.vsc_extra_restrictor = 0.0
+            d.vsc_extra_ballast = 0.0
+            if d.loaded:
                 self._push(d, d.base_restrictor, d.base_ballast, force=True)
-                self.whisper(d.car_id, "Catch-up over, BoP restored.")
+            # Lap times were meaningless during the phase; make the next one
+            # an out-lap so a slowed driver's crawl never reaches the model.
+            d.out_lap_pending = True
+        self.broadcast(f"SAFETY CAR ENDING: {why}. Handicaps restored.")
+        self.store.log("info", f"safety car ended: {why}")
+        log.info("VSC ended after %.0fs: %s", phase.elapsed, why)
 
     # -- background -------------------------------------------------------
 
     async def run_background(self) -> None:
-        """Housekeeping loop: VSC expiry, keepalive, deferred recomputes."""
+        """Housekeeping loop: safety car ticks, keepalive, deferred recomputes."""
+        last_keepalive = 0.0
         while True:
             try:
+                # An active phase is recomputed from live gaps every tick.
                 self.tick_vsc()
 
                 if self._pending_recompute:
@@ -499,13 +821,19 @@ class Engine(asyncio.DatagramProtocol):
                     await self.recompute()
 
                 # keepalive: if the server has gone quiet, re-arm realtime
-                if self.last_packet_ts and time.time() - self.last_packet_ts > 30:
+                now = time.time()
+                if (
+                    self.last_packet_ts
+                    and now - self.last_packet_ts > 30
+                    and now - last_keepalive > 10
+                ):
+                    last_keepalive = now
                     self.connected = False
                     self.send(p.enc_get_session_info(-1))
                     self.send(p.enc_realtime_interval(self.cfg.realtime_interval_ms))
             except Exception:
                 log.exception("background tick failed")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(max(0.2, self.cfg.vsc_tick_s))
 
     async def recompute(self) -> dict:
         loop = asyncio.get_running_loop()
@@ -540,8 +868,33 @@ class Engine(asyncio.DatagramProtocol):
                 if self.session
                 else None
             ),
+            "vsc": (
+                dict(
+                    self.vsc.to_json(),
+                    eta=(
+                        round(e, 1)
+                        if (c := self.drivers.get(self.vsc.caller_car_id)) is not None
+                        and (e := self.vsc_closure_eta(c)) is not None
+                        else None
+                    ),
+                    caller_name=(
+                        c.name
+                        if (c := self.drivers.get(self.vsc.caller_car_id))
+                        else "?"
+                    ),
+                )
+                if self.vsc
+                else None
+            ),
             "drivers": [
-                d.to_json()
+                dict(
+                    d.to_json(),
+                    gap_ahead=(
+                        round(g, 1)
+                        if (g := self.gap_ahead_seconds(d)) is not None
+                        else None
+                    ),
+                )
                 for d in sorted(self.drivers.values(), key=lambda x: -x.progress)
             ],
             "packets": self.packet_counts,

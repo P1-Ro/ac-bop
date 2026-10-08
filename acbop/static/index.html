@@ -33,35 +33,59 @@
       <div class="card"><div class="k">Session</div><div class="v" id="s-type">—</div></div>
       <div class="card"><div class="k">Track</div><div class="v" id="s-track">—</div></div>
       <div class="card"><div class="k">Drivers</div><div class="v" id="s-drivers">0</div></div>
-      <div class="card"><div class="k">BoP active</div><div class="v" id="s-applies">—</div></div>
+      <div class="card" title="Whether handicaps are being applied in this session type">
+        <div class="k">BoP active</div><div class="v" id="s-applies">—</div></div>
+    </div>
+
+    <!-- safety car phase banner -->
+    <div class="sc" id="sc-banner" hidden>
+      <div class="sc-head">
+        <span class="sc-tag">SAFETY CAR</span>
+        <strong id="sc-caller">—</strong> is closing up
+        <span class="spacer"></span>
+        <span class="faint">ends under <b id="sc-target">—</b> · time left <b id="sc-remaining">—</b></span>
+        <button class="act tiny" id="btn-sc-end" title="End this safety car phase now and restore every driver's normal handicap">End now</button>
+      </div>
+      <div class="sc-bar"><i id="sc-fill" style="width:0%"></i></div>
+      <div class="sc-foot">
+        <span>gap <b id="sc-gap">—</b> <span class="faint">(was <span id="sc-start">—</span>)</span></span>
+        <span class="faint">closed <b id="sc-pct">0%</b></span>
+        <span class="faint">est. <b id="sc-eta">—</b> to go</span>
+      </div>
     </div>
 
     <div class="toolbar">
-      <button class="act primary" id="btn-recompute">Recompute now</button>
-      <button class="act" id="btn-apply">Re-apply to grid</button>
+      <button class="act primary" id="btn-recompute"
+        title="Refit the pace model from every recorded lap and update all stored handicaps. Does not touch cars currently on track until you re-apply.">Recompute now</button>
+      <button class="act" id="btn-apply"
+        title="Send each driver on track their stored handicap again, without refitting anything. Use it after editing a handicap by hand, or if a driver's penalty looks out of step with what the Handicaps tab says.">Re-apply to grid</button>
       <span class="faint" id="recompute-msg"></span>
     </div>
+
+    <div class="funnel" id="funnel" hidden></div>
 
     <h2>Grid</h2>
     <table>
       <thead><tr>
         <th>#</th><th>Driver</th><th>Car</th>
-        <th class="num">Lap</th><th class="num">Last</th><th class="num">Best</th>
+        <th class="num">Lap</th>
+        <th class="num" title="Estimated gap to the car directly ahead">Gap</th>
+        <th class="num">Last</th><th class="num">Best</th>
         <th class="num">Ballast</th><th class="num">Restr.</th>
         <th>State</th><th></th>
       </tr></thead>
-      <tbody id="grid"><tr><td colspan="10" class="empty">Nobody on track</td></tr></tbody>
+      <tbody id="grid"><tr><td colspan="11" class="empty">Nobody on track</td></tr></tbody>
     </table>
 
     <h2>Activity</h2>
-    <div class="log" id="log"></div>
+    <table class="log"><tbody id="log"></tbody></table>
   </section>
 
   <!-- ================= DRIVERS ================= -->
   <section class="tab" id="tab-drivers">
     <p class="faint">Pace is this driver's average lap time relative to the field, with their
     handicap mathematically removed. Negative = quicker than average. A driver who is
-    disabled keeps racing but is excluded from the model and gets no handicap.</p>
+    switched off keeps racing but is excluded from the model and gets no handicap.</p>
     <table>
       <thead><tr>
         <th>Driver</th><th class="num">Pace</th><th class="num">Clean laps</th>
@@ -75,7 +99,7 @@
   <section class="tab" id="tab-handicaps">
     <div class="toolbar">
       <label class="faint">Track</label>
-      <select id="track-filter"><option value="">All tracks</option></select>
+      <select id="track-filter" title="Show only one track"><option value="">All tracks</option></select>
       <span class="spacer"></span>
       <span class="faint">Edit a value to pin it. Pinned rows are never auto-updated.</span>
     </div>
@@ -91,6 +115,9 @@
 
   <!-- ================= LAPS ================= -->
   <section class="tab" id="tab-laps">
+    <p class="faint">Every lap the server reported. Rejected laps are kept on purpose so you can
+    see why the model ignored them — click a colour to filter.</p>
+    <div class="legend" id="lap-legend"></div>
     <table>
       <thead><tr>
         <th>When</th><th>Driver</th><th>Track</th><th>Car</th>
@@ -145,8 +172,11 @@
   <section class="tab" id="tab-settings">
     <div class="toolbar">
       <button class="act primary" id="btn-save">Save settings</button>
+      <button class="act" id="btn-reset" title="Discard unsaved edits and reload from disk">Revert</button>
       <span class="faint" id="save-msg"></span>
     </div>
+    <p class="faint">Hover any setting for what it does and what changing it will actually cause.
+    Everything takes effect at the next recompute, except the connection group which needs a restart.</p>
     <div class="settings-grid" id="settings"></div>
   </section>
 
