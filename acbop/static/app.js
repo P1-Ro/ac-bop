@@ -3,19 +3,55 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
+/** Throw with the server's own explanation when there is one, not just a status code. */
+async function checked(r) {
+  if (r.ok) return r.json();
+  let detail = '';
+  try {
+    const body = await r.json();
+    detail = body.error || body.reason || '';
+  } catch { /* not JSON */ }
+  throw new Error(detail || `HTTP ${r.status}`);
+}
+
 const api = {
-  async get(p) { const r = await fetch(p); if (!r.ok) throw new Error(r.status); return r.json(); },
+  async get(p) { return checked(await fetch(p)); },
   async post(p, body) {
-    const r = await fetch(p, {
+    return checked(await fetch(p, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? '{}' : JSON.stringify(body),
-    });
-    if (!r.ok) throw new Error(r.status);
-    return r.json();
+    }));
   },
-  async del(p) { const r = await fetch(p, { method: 'DELETE' }); return r.json(); },
+  async del(p) { return checked(await fetch(p, { method: 'DELETE' })); },
 };
+
+// ---------------------------------------------------------------- toasts
+
+const TOAST_ICON = { ok: '✓', error: '✕', warn: '!', info: 'i' };
+
+/** Pop a transient message in the corner. Errors stay up longer than successes. */
+function toast(message, kind = 'ok', ms = kind === 'error' ? 9000 : 4500) {
+  const box = $('#toasts');
+  if (!box) return;
+  const close = () => {
+    if (!t.isConnected) return;
+    t.classList.add('leaving');
+    setTimeout(() => t.remove(), 200);
+  };
+  const t = el('div', { class: `toast ${kind}`, role: kind === 'error' ? 'alert' : null },
+    el('span', { class: 't-icon', 'aria-hidden': 'true' }, TOAST_ICON[kind] || ''),
+    el('span', { class: 't-msg' }, message),
+    el('button', { title: 'Dismiss', 'aria-label': 'Dismiss', onclick: close }, '×'));
+  box.appendChild(t);
+  // Never let a burst of messages bury the page.
+  while (box.children.length > 5) box.firstElementChild.remove();
+  let timer = setTimeout(close, ms);
+  t.addEventListener('mouseenter', () => clearTimeout(timer));
+  t.addEventListener('mouseleave', () => { timer = setTimeout(close, 2000); });
+}
+
+const errText = (e) => (e && e.message) || 'request failed';
 
 // ---------------------------------------------------------------- helpers
 
@@ -206,9 +242,13 @@ $$('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset
 function stateCell(d, vsc) {
   if (d.vsc_caller) return pill('CLOSING UP', 'vsc', 'Called the safety car — running with no handicap');
   if (d.vsc_slowed) {
-    return pill(`HELD +${d.vsc_extra_ballast}kg`, 'held',
-      `Being slowed by the safety car: +${d.vsc_extra_ballast} kg and ` +
-      `+${d.vsc_extra_restrictor}% on top of their own handicap`);
+    const running = d.vsc_measured_pct === null
+      ? 'pace still being measured'
+      : `running ${d.vsc_measured_pct}% slower than their normal pace`;
+    return pill(`LIMITED +${Math.round(d.vsc_extra_restrictor)}%`, 'held',
+      `Held by the safety car to a ${ms(d.vsc_target_ms)} lap with ` +
+      `+${d.vsc_extra_restrictor}% restrictor on top of their own handicap ` +
+      `(no ballast added) — ${running}`);
   }
   if (!d.loaded) return pill('loading', '', 'Connected but still loading the track');
   if (d.vsc_uses) return pill('SC used', '', 'Has already called their safety car this race');
@@ -255,7 +295,7 @@ async function refreshLive() {
         title: 'Estimated gap to the car directly ahead, in seconds' },
       { v: ms(d.last_laptime_ms), class: 'num' },
       { v: ms(d.best_laptime_ms), class: 'num' },
-      { v: d.ballast, class: 'num' + (d.vsc_slowed ? ' held-val' : '') },
+      { v: d.ballast, class: 'num' },
       { v: d.restrictor, class: 'num' + (d.vsc_slowed ? ' held-val' : '') },
       { node: stateCell(d, s.vsc) },
       { node: el('button', {
@@ -282,17 +322,15 @@ async function refreshLive() {
 // call changes nothing, so it has to be re-enabled here or it stays dead.
 async function callSafetyCar(btn, d) {
   btn.disabled = true;
-  let msg;
   try {
     const r = await api.post(`/api/vsc/${d.car_id}`);
-    msg = r.started ? '' : `safety car for ${d.name} refused: ${r.reason}`;
-  } catch {
-    msg = `safety car for ${d.name} failed: request error`;
+    if (r.started) toast(`Safety car started for ${d.name}`, 'ok');
+    else toast(`Safety car for ${d.name} refused: ${r.reason}`, 'warn', 8000);
+  } catch (e) {
+    toast(`Safety car for ${d.name} failed: ${errText(e)}`, 'error');
   } finally {
     btn.disabled = false;
   }
-  $('#sc-msg').textContent = msg;
-  if (msg) setTimeout(() => { if ($('#sc-msg').textContent === msg) $('#sc-msg').textContent = ''; }, 8000);
   refreshLive();
 }
 
@@ -307,7 +345,11 @@ $('#btn-recompute').addEventListener('click', async (e) => {
   try {
     const r = await api.post('/api/recompute');
     renderFunnel(r);
-  } catch { $('#recompute-msg').textContent = 'failed'; }
+    toast(`Model refit: ${r.drivers_rated} rated drivers, ${r.handicaps_updated} handicaps updated`, 'ok');
+  } catch (err) {
+    $('#recompute-msg').textContent = '';
+    toast(`Recompute failed: ${errText(err)}`, 'error');
+  }
   e.target.disabled = false;
 });
 
@@ -349,9 +391,12 @@ function renderFunnel(r) {
 
 $('#btn-apply').addEventListener('click', async (e) => {
   e.target.disabled = true;
-  const r = await api.post('/api/apply');
-  $('#recompute-msg').textContent =
-    `Re-sent each driver's stored handicap to the server (${r.drivers} on track)`;
+  try {
+    const r = await api.post('/api/apply');
+    toast(`Re-sent each driver's stored handicap to the server (${r.drivers} on track)`, 'ok');
+  } catch (err) {
+    toast(`Re-apply failed: ${errText(err)}`, 'error');
+  }
   e.target.disabled = false;
 });
 
@@ -374,8 +419,17 @@ async function refreshDrivers() {
       { node: el('input', {
           type: 'checkbox', checked: d.enabled ? 'checked' : null,
           title: 'Off = this driver keeps racing but is excluded from the model and gets no handicap',
-          onchange: (e) => api.post('/api/drivers/' + encodeURIComponent(d.guid),
-            { enabled: e.target.checked }),
+          onchange: async (e) => {
+            const on = e.target.checked;
+            try {
+              await api.post('/api/drivers/' + encodeURIComponent(d.guid), { enabled: on });
+              toast(on ? `${d.name} is back in the system`
+                       : `${d.name} excluded: no handicap, laps ignored by the model`, 'ok');
+            } catch (err) {
+              e.target.checked = !on;
+              toast(`Could not update ${d.name}: ${errText(err)}`, 'error');
+            }
+          },
         }) },
     ],
   })), 'No drivers seen yet', 6);
@@ -394,10 +448,32 @@ async function refreshHandicaps() {
   const track = $('#track-filter').value;
   const hs = await api.get('/api/handicaps' + (track ? '?track=' + encodeURIComponent(track) : ''));
 
-  const save = (h, patch) => api.post('/api/handicaps', {
-    guid: h.guid, track: h.track, car_model: h.car_model,
-    restrictor: h.restrictor, ballast: h.ballast, manual: true, ...patch,
-  }).then(refreshHandicaps);
+  const who = (h) => `${h.name || h.guid.slice(0, 10)} @ ${h.track}`;
+
+  const save = async (h, patch) => {
+    const row = {
+      guid: h.guid, track: h.track, car_model: h.car_model,
+      restrictor: h.restrictor, ballast: h.ballast, manual: true, ...patch,
+    };
+    try {
+      await api.post('/api/handicaps', row);
+      toast(`Pinned ${who(h)}: ${Math.round(row.ballast)} kg, ${row.restrictor}%`, 'ok');
+    } catch (err) {
+      toast(`Could not save ${who(h)}: ${errText(err)}`, 'error');
+    }
+    refreshHandicaps();
+  };
+
+  const unpin = async (h) => {
+    try {
+      await api.del(`/api/handicaps/${encodeURIComponent(h.guid)}/` +
+        `${encodeURIComponent(h.track)}/${encodeURIComponent(h.car_model)}`);
+      toast(`${who(h)} handed back to the model`, 'ok');
+    } catch (err) {
+      toast(`Could not unpin ${who(h)}: ${errText(err)}`, 'error');
+    }
+    refreshHandicaps();
+  };
 
   syncTable($('#handicaps'), hs.map((h) => ({
     key: [h.guid, h.track, h.car_model].join('|'),
@@ -420,9 +496,7 @@ async function refreshHandicaps() {
           : pill('auto', '', 'Maintained by the model on every recompute') },
       { node: h.manual
           ? el('button', { class: 'act tiny', title: 'Hand this row back to the model',
-              onclick: () => api.del(
-                `/api/handicaps/${encodeURIComponent(h.guid)}/${encodeURIComponent(h.track)}/${encodeURIComponent(h.car_model)}`
-              ).then(refreshHandicaps) }, 'unpin')
+              onclick: () => unpin(h) }, 'unpin')
           : el('span', { class: 'faint' }, '') },
     ],
   })), 'No handicaps yet — run a session, then Recompute', 7);
@@ -624,8 +698,8 @@ const GROUPS = [
       'What a driver types in chat to call one.',
       'Keep the leading "!" — a "/" prefix would be eaten by the server as an unknown admin command.'],
     ['vsc_max_slowdown', 'Hold strength',
-      'How much slower the held cars are made to run, as a fraction of their own pace. 0.6 means they lap 60% slower.',
-      'This is the main lever on how fast the field comes back together: 0.6 closes about 0.37s of gap per second of running, so a 20s gap takes roughly 50s. Higher closes faster but the held cars become horrible to drive.'],
+      'How much slower than the caller the held cars are limited to, as a fraction of the caller’s own unhandicapped lap time. 0.6 means a lap 60% slower.',
+      'This is the main lever on how fast the field comes back together: 0.6 closes about 0.37s of gap per second of running, so a 20s gap takes roughly 50s. Higher closes faster but the held cars crawl.'],
     ['vsc_target_gap_s', 'End when gap under (s)',
       'The phase ends as soon as the caller is this close to the car ahead.',
       'Lower means the caller is brought right onto the back of the car ahead; higher ends it sooner.'],
@@ -652,17 +726,23 @@ const GROUPS = [
       'Hold drivers who are behind the caller as well.',
       'Keeps the order behind the caller intact rather than letting them through. Off leaves those drivers alone.'],
     ['vsc_ramp_s', 'Ease in/out (s)',
-      'Spread the penalty change over this long at the start and end of a phase.',
-      'Stops a driver being hit with hundreds of kilos between one corner and the next.'],
+      'Spread the limiter change over this long at the start and end of a phase.',
+      'Stops a driver losing most of their power between one corner and the next.'],
     ['vsc_tick_s', 'Recalculation interval (s)',
       'How often gaps are re-measured and the hold recomputed.',
       'Lower reacts faster but sends more admin commands, each of which pops a notification for the affected driver.'],
-    ['vsc_max_extra_restrictor', 'Max extra restrictor (%)',
-      'Ceiling on the restrictor the safety car may add on top of a driver’s own handicap.',
-      'AC’s own limit is 100%.'],
-    ['vsc_max_extra_ballast', 'Max extra ballast (kg)',
-      'Ceiling on the weight the safety car may add on top of a driver’s own handicap.',
-      'AC’s own limit is 5000 kg. 2500 kg with full restrictor is roughly half pace.'],
+    ['vsc_max_restrictor', 'Limiter ceiling (%)',
+      'The most restrictor a held car may carry, its normal handicap included. The safety car never adds ballast.',
+      'AC accepts up to 400%. Lower it if your server caps the admin command lower, or if your cars become undriveable before reaching the target pace.'],
+    ['vsc_limiter_gain', 'Limiter correction speed',
+      'How hard each held car’s restrictor is corrected toward the target pace, per second, from their measured live pace.',
+      'Higher locks on faster but can overshoot and send more commands. 0 turns the correction off and relies on the model’s estimate alone, which tends to under-deliver at high restrictor.'],
+    ['vsc_pace_window_s', 'Pace measuring window (s)',
+      'Seconds of live running averaged to measure a held car’s pace, judged against that driver’s own lap profile.',
+      'Longer is steadier but slower to react. Shorter reacts faster but gets jumpy on a car update rate of one per second.'],
+    ['vsc_deadband_restrictor', 'Limiter deadband (%)',
+      'During a safety car, do not re-send a restrictor change smaller than this.',
+      'Every command pops a notification for the driver. Higher means fewer pop-ups and a slightly looser hold.'],
   ]],
   ['Application', [
     ['apply_in_practice', 'Apply in practice', 'Hand out handicaps during practice sessions.',
@@ -745,23 +825,45 @@ async function refreshSettings() {
   }
 }
 
-$('#btn-save').addEventListener('click', async () => {
+$('#btn-save').addEventListener('click', async (e) => {
   const patch = {};
   $$('#settings input').forEach((i) => {
     patch[i.dataset.key] = i.type === 'checkbox' ? i.checked : i.value;
   });
-  const r = await api.post('/api/config', patch);
-  cfgCache = r.config;
-  $('#save-msg').textContent = r.changed.length
-    ? `saved: ${r.changed.join(', ')}` : 'no changes';
-  setTimeout(() => { $('#save-msg').textContent = ''; }, 5000);
+  e.target.disabled = true;
+  try {
+    const r = await api.post('/api/config', patch);
+    cfgCache = r.config;
+    if (r.rejected && r.rejected.length) {
+      toast(`Not saved, invalid value for: ${r.rejected.join(', ')}`, 'error');
+    }
+    if (r.changed.length) toast(`Saved: ${r.changed.join(', ')}`, 'ok');
+    else if (!(r.rejected && r.rejected.length)) toast('No changes to save', 'info');
+  } catch (err) {
+    toast(`Saving settings failed: ${errText(err)}`, 'error');
+  }
+  e.target.disabled = false;
 });
 
-$('#btn-reset').addEventListener('click', refreshSettings);
+$('#btn-reset').addEventListener('click', async () => {
+  try {
+    await refreshSettings();
+    toast('Unsaved edits discarded', 'info');
+  } catch (err) {
+    toast(`Could not reload settings: ${errText(err)}`, 'error');
+  }
+});
 
 $('#btn-sc-end').addEventListener('click', async (e) => {
   e.target.disabled = true;
-  try { await api.del('/api/vsc'); } finally { e.target.disabled = false; }
+  try {
+    await api.del('/api/vsc');
+    toast('Safety car ended, handicaps restored', 'ok');
+  } catch (err) {
+    toast(`Could not end the safety car: ${errText(err)}`, 'error');
+  } finally {
+    e.target.disabled = false;
+  }
   refreshLive();
 });
 

@@ -87,30 +87,47 @@ a funnel accounting for every single recorded lap so nothing can go missing quie
 
 ### The safety car
 
-Vanilla acServer has no safety car and no speed limiter, so this is built out of the
-handicap system. Everyone carries a **floor** (default 6% / 25 kg), which leaves
-headroom to go *down*.
+Vanilla acServer has no safety car and no speed limiter, and the plugin protocol cannot
+set one: the only levers a server plugin has are `/ballast` and `/restrictor`. A true
+pit-style limiter would need a script running on every driver's PC (CSP Lua), which
+this project deliberately avoids. So the safety car is a **pace limiter built from the
+restrictor alone**. It never adds ballast. Everyone carries a **floor** (default 6% /
+25 kg), which leaves headroom to go *down*.
 
 Typing `!vsc` starts a live phase:
 
 - the **caller** runs with no handicap at all
-- every car **ahead** is slowed well beyond its normal handicap, so the gap actually
-  closes
+- every car **ahead** is limited to the same target lap time: the caller's own
+  unhandicapped pace × (1 + `vsc_max_slowdown`)
 - gaps are re-measured every second and the whole thing is recomputed from live
   positions
 - it ends the moment the caller is within `vsc_target_gap_s` of the car ahead, or at the
   hard time limit
 
-The amount of slowdown is **solved from physics, not guessed**. If a held car runs at
-(1 + s) times the caller's lap time, the caller gains `s/(1+s)` seconds per second of
-running. At the default `vsc_max_slowdown` of 0.6 that is 0.37 s/s, so a 20-second gap
-takes about 50 seconds to close. The ballast and restrictor needed for that slowdown
-come from the model's learned per-track sensitivity, which is why the numbers differ
-between Monza and Magione.
+**The restrictor is set per driver, from their pace.** A quick driver needs more
+restrictor than a slow one to reach the same target. Each held car's starting value
+comes from that driver's own lap time and the model's learned per-track sensitivity.
+After that, a live correction compares their measured pace with the target every tick
+and nudges the restrictor until they match. The correction matters because a restrictor
+bites less than linearly at high values, so the model's estimate alone under-delivers.
+In the test it adds 2–14% on top of that estimate, and every held car settles within
+0.2% of the target pace.
 
-This matters: a fixed 150 kg only costs about 9% of lap time, which would take three
-minutes to close a 20-second gap. The first version of this feature did exactly that and
-barely worked.
+Pace is measured against **each driver's own lap profile**, recorded from their last
+clean lap: how much of their lap time goes into each part of the circuit. Without it, a
+car in a slow hairpin would look as if it had been slowed too hard, and one on a long
+straight as not slowed enough, so the restrictor would swing every few seconds. The same
+profile turns gaps into real seconds rather than track distance, which is why the
+closure rate and ETA hold steady through a lap.
+
+The closure rate is **physics, not a guess**. If a held car runs at (1 + s) times the
+caller's lap time, the caller gains `s/(1+s)` seconds per second of running. At the
+default `vsc_max_slowdown` of 0.6 that is 0.37 s/s, so a 20-second gap takes about
+50 seconds to close.
+
+An earlier version did this with ballast, adding up to 2.5 tonnes. It worked, but the
+held cars wallowed, understeered and braked like lorries. A restrictor only takes away
+power, so the cars still turn and stop normally.
 
 Two modes:
 
@@ -247,6 +264,10 @@ maximum (unfair to a slow one).
 - **Settings** — every setting, each with a one-line description plus a tooltip
   explaining what changing it will actually cause. Connection settings need a restart.
 
+Every action (recompute, re-apply, a safety car call or end, a handicap edit or unpin,
+a driver toggle, saving settings) confirms with a toast in the corner: green when it
+worked, red with the server's reason when it did not.
+
 The tables update in place rather than being rebuilt, so the page does not flicker,
 scroll position survives, and a value you are halfway through typing is never clobbered
 by a poll.
@@ -275,15 +296,20 @@ race   spread%  P1-last%   handicaps (kg/%)
    8     0.724      2.17   Alien:120/25 Quick:102/17 ... Slow:25/6
 ```
 
-The safety car test simulates real running through a phase, with each car's speed set by
-whatever penalty it is carrying at that instant, and asserts the caller genuinely closes:
+The safety car test simulates real running through a phase. Each car's speed comes from
+the restrictor it is carrying at that moment, through a restrictor that bites less than
+linearly, on a track with slow corners and fast straights. The test asserts that no
+ballast is ever added, that every held car settles on the target pace, and that the
+caller genuinely closes:
 
 ```
-    t     gap   penalties (extra kg)
-  0.0   20.5s   +2500 +2500 +2500
- 16.0   14.4s   +2500 +2500 +2500
- 32.0    8.3s   +2500 +2500 +2500
- gap 20.7s -> 2.9s in 46s of running   (predicted ETA was 47s)
+    t     gap   extra restrictor (measured slowdown)
+    0.3   28.0s   +214%(+0%) +213%(+0%) +212%(+0%)
+   16.4   21.9s   +329%(+58%) +325%(+58%) +323%(+58%)
+   32.5   15.8s   +336%(+59%) +328%(+59%) +326%(+59%)
+   48.6    9.6s   +336%(+59%) +328%(+59%) +326%(+59%)
+   64.7    3.4s   +336%(+59%) +328%(+59%) +323%(+59%)
+ gap 28.0s -> 2.9s in 66s of running   (predicted ETA was 67s)
 ```
 
 ---
@@ -314,13 +340,17 @@ to disable the term.
 **Admin penalties pop a notification** for the affected driver. The deadband settings
 stop acbop resending unchanged values, which keeps this to once per session per driver
 in normal running. During a safety car the values change every tick by design, so the
-held drivers will see repeated notifications — raise `vsc_tick_s` if that bothers your
+held drivers see a few notifications as the limiter settles. `vsc_deadband_restrictor`
+(default 3%) stops it resending small corrections; raise it, or `vsc_tick_s`, if that
+bothers your
 group.
 
-**A held car is carrying thousands of kilos.** That is deliberate — it is the only way
-to make a car slow enough to act as a safety car — but it will feel absurd, and the car
-will understeer heavily. `vsc_max_slowdown` is the dial if your group finds it too much;
-lower is gentler but closes the gap more slowly, and the maths is in the tooltip.
+**A held car runs a very large restrictor**, often 300% or more. That is what it takes to
+hold a car to 60% slower, and AC accepts values up to 400% (`vsc_max_restrictor`). If
+your server caps the admin command lower, set the ceiling to match. The live correction
+then stops at the cap, and the caller closes more slowly than the ETA says.
+`vsc_max_slowdown` is the dial if your group finds the hold too slow: lower is gentler
+but closes the gap more slowly, and the maths is in the tooltip.
 
 **Pit detection is approximate.** ACSP gives no pit event, so a sustained stop is
 treated as "the next lap is an out-lap". A driver who parks on track and rejoins loses

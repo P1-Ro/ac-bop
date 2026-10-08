@@ -103,16 +103,31 @@ class Config:
     vsc_race_only: bool = True
     vsc_tick_s: float = 1.0            # how often gaps and penalties are redone
 
-    # How much slower the cars being held are made to run, as a fraction of
-    # their own pace. 0.6 means they lap 60% slower, which closes roughly
-    # 0.37 s of gap per second of running — a 20 s gap takes about 50 s. This
-    # is the main lever on how fast the field comes back together. Pushing it
-    # much past 0.6 makes the cars genuinely unpleasant to drive.
+    # How much slower than the caller the held cars are made to run. Every
+    # held car is limited to the same target lap time: the caller's own
+    # unhandicapped pace times (1 + this). 0.6 means 60% slower, which closes
+    # roughly 0.37 s of gap per second of running — a 20 s gap takes about
+    # 50 s. This is the main lever on how fast the field comes back together.
     vsc_max_slowdown: float = 0.60
-    # The penalty needed for that slowdown is solved from the learned per-track
-    # sensitivity, bounded by these. AC's own ceilings are 100% and 5000 kg.
-    vsc_max_extra_restrictor: float = 100.0
-    vsc_max_extra_ballast: float = 2500.0
+    # The hold is a pace limiter built from the restrictor alone; no ballast is
+    # ever added. Each held car's restrictor is solved from that driver's own
+    # pace (a quick driver needs more to reach the same target than a slow
+    # one), then trimmed every tick from their measured live pace, so the
+    # restrictor's non-linear bite at high values is corrected automatically.
+    # Ceiling on the total restrictor, normal handicap included. AC accepts
+    # up to 400%; lower it if your server caps the admin command lower.
+    vsc_max_restrictor: float = 400.0
+    # How hard the live correction pulls toward the target pace, per second.
+    # Higher reacts faster but can overshoot; 0 uses the model estimate only.
+    vsc_limiter_gain: float = 0.10
+    # Seconds of live running averaged to measure a held car's pace. Compared
+    # against that driver's own lap profile, so slow corners and long
+    # straights do not read as the car being too slow or too fast.
+    vsc_pace_window_s: float = 6.0
+    # Restrictor changes smaller than this are not sent during a phase. Each
+    # command pops a notification for the driver, so keep this above the
+    # normal deadband.
+    vsc_deadband_restrictor: float = 3.0
     # Grade the slowdown so cars further ahead are held harder, which bunches
     # the leaders together as well — more like a real safety car, but the
     # caller closes more slowly because the car directly ahead of them is held
@@ -121,8 +136,8 @@ class Config:
     # Drivers already behind the caller are left alone by default. Turn this on
     # to slow the whole field instead, which keeps relative order behind intact.
     vsc_slow_whole_field: bool = False
-    # Ease the penalty in and out over this long, so nobody is hit with 150 kg
-    # between one corner and the next.
+    # Ease the limiter in and out over this long, so nobody loses half their
+    # power between one corner and the next.
     vsc_ramp_s: float = 3.0
 
     # --- behaviour --------------------------------------------------------
@@ -154,8 +169,11 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def apply_updates(self, updates: dict[str, Any]) -> list[str]:
-        """Apply a partial update, coercing types. Returns the keys changed."""
+    def apply_updates(
+        self, updates: dict[str, Any], rejected: list[str] | None = None
+    ) -> list[str]:
+        """Apply a partial update, coercing types. Returns the keys changed;
+        keys whose value could not be coerced are appended to `rejected`."""
         changed = []
         types = {f.name: f.type for f in fields(self)}
         for key, value in updates.items():
@@ -172,6 +190,8 @@ class Config:
                 else:
                     value = str(value)
             except (TypeError, ValueError):
+                if rejected is not None:
+                    rejected.append(key)
                 continue
             if value != current:
                 setattr(self, key, value)

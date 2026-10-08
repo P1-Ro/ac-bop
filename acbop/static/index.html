@@ -61,8 +61,6 @@
       <button class="act" id="btn-apply"
         title="Send each driver on track their stored handicap again, without refitting anything. Use it after editing a handicap by hand, or if a driver's penalty looks out of step with what the Handicaps tab says.">Re-apply to grid</button>
       <span class="faint" id="recompute-msg"></span>
-      <span class="spacer"></span>
-      <span class="warn-msg" id="sc-msg"></span>
     </div>
 
     <div class="funnel" id="funnel" hidden></div>
@@ -176,7 +174,6 @@
     <div class="toolbar">
       <button class="act primary" id="btn-save">Save settings</button>
       <button class="act" id="btn-reset" title="Discard unsaved edits and reload from disk">Revert</button>
-      <span class="faint" id="save-msg"></span>
     </div>
     <p class="faint">Hover any setting for what it does and what changing it will actually cause.
     Everything takes effect at the next recompute, except the connection group which needs a restart.</p>
@@ -184,6 +181,8 @@
   </section>
 
 </main>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script src="/static/app.js"></script>
 </body>

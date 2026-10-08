@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import simserver
+from acbop import engine as engine_mod
 from acbop.config import Config
 from acbop.db import Store
 from acbop.engine import Engine
@@ -46,8 +47,8 @@ async def build(cfg_over: dict | None = None, port_base: int = 12451):
         vsc_max_duration_s=120.0,
         vsc_target_gap_s=3.0,
         vsc_min_gap_s=8.0,
-        vsc_ramp_s=0.5,
-        vsc_tick_s=0.25,
+        vsc_ramp_s=2.0,
+        vsc_tick_s=0.2,
         vsc_max_slowdown=0.60,
         deadband_restrictor=0.5, deadband_ballast=2.0,
         **(cfg_over or {}),
@@ -62,7 +63,74 @@ async def build(cfg_over: dict | None = None, port_base: int = 12451):
     return cfg, store, engine, transport, bg
 
 
+# The engine's clock runs WARP times faster than the wall clock, so a lap and a
+# half of live running takes seconds rather than minutes. Everything the
+# limiter measures is on the engine's clock, so the physics stays consistent.
+WARP = 5.0
+_t0 = time.time()
+
+
+class _WarpedTime:
+    @staticmethod
+    def time() -> float:
+        return _t0 + (time.time() - _t0) * WARP
+
+
+def true_loss(s: SimDriver) -> float:
+    """Fractional pace loss from what the car carries. The restrictor bites
+    less than linearly at high values, as a real one does, so the model's
+    linear estimate under-delivers and the live correction has to make it up."""
+    kr, kb = simserver.true_k("mugello")
+    return kr * s.restrictor / (1.0 + s.restrictor / 1000.0) + kb * (s.ballast / 10.0)
+
+
+def corner_shape(spline: float) -> float:
+    """Share of lap time spent per unit of track: slow corners, fast straights.
+    Integrates to 1 over a lap, so lap time is unaffected."""
+    return 1.0 + 0.4 * math.sin(2 * math.pi * spline)
+
+
+def lap_time_fraction(spline: float) -> float:
+    """Share of the lap's time already spent at this point: corner_shape integrated."""
+    return spline + 0.4 * (1 - math.cos(2 * math.pi * spline)) / (2 * math.pi)
+
+
+async def drive(engine, srv, sims, seconds: float, on_step=None) -> float:
+    """Run every car at the speed its current penalty allows, on the engine's
+    clock, reporting positions and lap completions as a real server would."""
+    clock = engine_mod.time.time
+    start = last = clock()
+    # Back-date each car's lap start to where it already is on the lap, so the
+    # first lap it completes is reported at a realistic time.
+    lap_start = {
+        d.car_id: last - lap_time_fraction(sims[d.car_id].spline) * BASE_MS / 1000.0
+        * math.exp(sims[d.car_id].skill) * (1.0 + true_loss(sims[d.car_id]))
+        for d in engine.drivers.values()
+    }
+    while clock() - start < seconds:
+        await srv.pump(0.06)
+        now = clock()
+        dt = now - last
+        last = now
+        for d in list(engine.drivers.values()):
+            s = sims[d.car_id]
+            lap_s = BASE_MS / 1000.0 * math.exp(s.skill) * (1.0 + true_loss(s))
+            s.spline += dt / (lap_s * corner_shape(s.spline))
+            if s.spline >= 1.0:
+                s.spline -= 1.0
+                srv.send(p_car_update(d.car_id, s.spline, 170.0))
+                s.laps += 1
+                srv.send(p_lap_completed(d.car_id, int((now - lap_start[d.car_id]) * 1000), 0, []))
+                lap_start[d.car_id] = now
+            else:
+                srv.send(p_car_update(d.car_id, s.spline, 170.0))
+        if on_step is not None and on_step(now - start) is False:
+            break
+    return clock() - start
+
+
 async def main() -> int:
+    engine_mod.time = _WarpedTime
     # ---------------------------------------------------------------- setup
     cfg, store, engine, transport, bg = await build()
     sims = [
@@ -79,13 +147,19 @@ async def main() -> int:
     await srv.run_session("mugello", BASE_MS, n_laps=4, cuts_rate=0.0, declared_laps=60)
     await srv.pump(0.3)
 
-    # Spread the field: leader well clear, "Last" 20s back of Third.
-    # 20s at a 95s lap is 0.21 of a lap.
+    # Spread the field: leader well clear, "Last" ~20s back of Third, then
+    # race a lap and a half so everyone has a live lap profile.
     layout = {0: 0.95, 1: 0.70, 2: 0.45, 3: 0.24}
     for cid, sp in layout.items():
         engine.drivers[cid].laps_done = 3
+        sims[cid].spline = sp
         srv.send(p_car_update(cid, sp, 180.0))
-    await srv.pump(0.4)
+    await srv.pump(0.3)
+    await drive(engine, srv, sims, BASE_MS / 1000.0 * 2.1)
+
+    missing = [d.name for d in engine.drivers.values() if not d.pace_profile]
+    check(not missing, "every driver has a live lap profile before the call"
+          + (f" (missing: {', '.join(missing)})" if missing else ""))
 
     last = engine.drivers[3]
     gap0 = engine.gap_ahead_seconds(last)
@@ -96,8 +170,9 @@ async def main() -> int:
 
     # ------------------------------------------------- the phase itself
     srv.chat_to_drivers.clear()
+    srv.admin_log.clear()
     srv.send(p_chat(3, "!vsc"))
-    await srv.pump(0.6)
+    await srv.pump(0.3)
 
     check(engine.vsc is not None, "phase started")
     check(any("SAFETY CAR" in m for m in srv.chat_to_drivers), "field was told")
@@ -105,66 +180,73 @@ async def main() -> int:
     # The caller must be unhandicapped...
     check(sims[3].ballast == 0 and sims[3].restrictor == 0,
           f"caller unhandicapped ({sims[3].ballast:.0f}kg/{sims[3].restrictor:.0f}%)")
-
-    # ...and everyone ahead must be slowed BEYOND their normal handicap.
-    slowed = [
-        (d.name, sims[d.car_id].ballast - base[d.car_id][1])
-        for d in engine.drivers.values() if d.car_id != 3
-    ]
-    check(all(extra > 0 for _, extra in slowed),
-          "every car ahead is slowed beyond its normal handicap: "
-          + ", ".join(f"{n} +{e:.0f}kg" for n, e in slowed))
-
-    # In the default mode every car at or beyond the gap the caller must close
-    # is held as hard as allowed, which gives the fastest possible closure.
-    extra_by_pos = [sims[c].ballast - base[c][1] for c in (0, 1, 2)]
-    check(min(extra_by_pos) > 0 and max(extra_by_pos) - min(extra_by_pos) < 50,
-          f"all cars ahead held at full strength for maximum closure "
-          f"(leader +{extra_by_pos[0]:.0f}kg, 2nd +{extra_by_pos[1]:.0f}kg, "
-          f"3rd +{extra_by_pos[2]:.0f}kg)")
-
     eta = engine.vsc_closure_eta(last)
-    check(eta is not None and 20 < eta < 120,
-          f"closure ETA is physically sane ({eta:.0f}s for a {gap0:.0f}s gap)")
 
     # ------------------------------- does the gap ACTUALLY close? ---------
-    # Simulate 12 seconds of running: each car advances at a speed set by the
-    # handicap it is carrying right now, exactly as the real cars would.
     print("\n  simulating running under the phase:")
-    print(f"  {'t':>5} {'gap':>7}   penalties (extra kg)")
+    print(f"  {'t':>5} {'gap':>7}   extra restrictor / measured vs target pace")
     gaps = [gap0]
-    t = 0.0
-    step = 0.5
-    while t < 70.0 and engine.vsc is not None:
-        for d in engine.drivers.values():
-            s = sims[d.car_id]
-            # fractional pace loss from whatever is currently applied
-            kr, kb = simserver.true_k("mugello")
-            loss = kr * s.restrictor + kb * (s.ballast / 10.0)
-            speed = 1.0 / (math.exp(s.skill) * (1.0 + loss))
-            d.spline += step / (BASE_MS / 1000.0) * speed
-            while d.spline >= 1.0:
-                d.spline -= 1.0
-                # a real server would report the completed lap
-                srv.send(p_lap_completed(d.car_id, int(BASE_MS), 0, []))
-            srv.send(p_car_update(d.car_id, d.spline, 170.0))
-        await srv.pump(step)
+    ballast_touched = []
+    pace_err: dict[int, list[float]] = {c: [] for c in (0, 1, 2)}
+    shown = [-99.0]
+    trims: dict[int, float] = {}
+
+    def step(t: float):
+        if engine.vsc is None:
+            return False
+        trims.update(engine.vsc.trims)
+        for c in (0, 1, 2):
+            if abs(sims[c].ballast - base[c][1]) > 0.5:
+                ballast_touched.append((c, sims[c].ballast))
+            d = engine.drivers[c]
+            if t > 20.0 and d.vsc_target_ms:
+                s = sims[c]
+                true_lap = BASE_MS * math.exp(s.skill) * (1.0 + true_loss(s))
+                pace_err[c].append(true_lap / d.vsc_target_ms - 1.0)
         g = engine.gap_ahead_seconds(last)
         if g is not None:
             gaps.append(g)
-            if round(t * 2) % 16 == 0:
-                pen = " ".join(
-                    f"{sims[c].ballast - base[c][1]:+.0f}" for c in (0, 1, 2)
+            if t - shown[0] >= 8.0:
+                shown[0] = t
+                held = " ".join(
+                    f"+{sims[c].restrictor - base[c][0]:3.0f}%"
+                    f"({(engine.drivers[c].vsc_measured_slow or 0) * 100:+.0f}%)"
+                    for c in (0, 1, 2)
                 )
-                print(f"  {t:5.1f} {g:6.1f}s   {pen}")
-        t += step
+                print(f"  {t:5.1f} {g:6.1f}s   {held}")
+        return True
 
-    print(f"\n  gap {gaps[0]:.1f}s -> {gaps[-1]:.1f}s in {t:.0f}s of running")
+    ran = await drive(engine, srv, sims, 90.0, on_step=step)
+
+    print(f"\n  gap {gaps[0]:.1f}s -> {gaps[-1]:.1f}s in {ran:.0f}s of running")
+    check(not ballast_touched,
+          "no ballast is ever added by the safety car"
+          + (f" (touched: {ballast_touched[:3]})" if ballast_touched else ""))
     check(gaps[-1] <= cfg.vsc_target_gap_s + 0.5,
           f"the caller actually caught the pack ({gaps[0]:.1f}s -> {gaps[-1]:.1f}s, "
           f"target {cfg.vsc_target_gap_s:.0f}s)")
     check(all(gaps[i + 1] <= gaps[i] + 0.4 for i in range(len(gaps) - 1)),
           "gap closed monotonically (no oscillation)")
+    check(eta is not None and abs(eta - ran) < 0.25 * ran,
+          f"the predicted ETA held up ({eta:.0f}s predicted, {ran:.0f}s actual)")
+
+    # Every held car is driven to the same target pace, whatever its own
+    # speed: the restrictor is tuned per driver from their measured pace.
+    for c in (0, 1, 2):
+        errs = pace_err[c]
+        tail = errs[len(errs) // 2:] or [9.9]
+        mean = sum(tail) / len(tail)
+        check(abs(mean) < 0.06,
+              f"{sims[c].name} held to the target pace ({mean * 100:+.1f}% off once settled)")
+
+    # The model's linear estimate under-delivers on this restrictor; the live
+    # correction must have pushed every held car past it.
+    check(all(t > 0 for t in trims.values()) and len(trims) == 3,
+          "live correction added restrictor where the model estimate fell short: "
+          + ", ".join(f"{sims[c].name} {t:+.0f}%" for c, t in sorted(trims.items())))
+
+    sent = sum(1 for cmd in srv.admin_log if cmd.startswith("/restrictor 0 "))
+    check(sent < 25, f"the limiter is not spamming commands (leader got {sent})")
 
     # ----------------------------------------- end and restore -----------
     deadline = time.time() + 10
@@ -227,12 +309,12 @@ async def main() -> int:
         srv2.send(p_car_update(cid, sp, 180.0))
     await srv2.pump(0.4)
 
-    base2 = {d.car_id: d.base_ballast for d in engine2.drivers.values()}
+    base2 = {d.car_id: d.base_restrictor for d in engine2.drivers.values()}
     srv2.send(p_chat(1, "!vsc"))
     await srv2.pump(0.8)
-    behind_extra = sims2[2].ballast - base2[2]
+    behind_extra = sims2[2].restrictor - base2[2]
     check(engine2.vsc is not None and behind_extra > 0,
-          f"with vsc_slow_whole_field the car behind is slowed too (+{behind_extra:.0f}kg)")
+          f"with vsc_slow_whole_field the car behind is slowed too (+{behind_extra:.0f}%)")
 
     bg2.cancel()
     transport2.close()
