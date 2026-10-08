@@ -161,6 +161,7 @@ button.act:disabled { opacity: .4; cursor: default; }
 button.act:disabled:hover { border-color: var(--line); background: var(--panel-2); }
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.warn-msg { color: var(--accent); font-size: 12px; }
 
 /* ---------------------------------------------------------------- inputs */
 

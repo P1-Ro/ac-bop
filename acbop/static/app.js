@@ -264,7 +264,7 @@ async function refreshLive() {
             ? 'A safety car is already running'
             : `Call a safety car for ${d.name} from here, ignoring the usual limits`,
           disabled: !!s.vsc || null,
-          onclick: (e) => { e.target.disabled = true; api.post(`/api/vsc/${d.car_id}`).then(refreshLive); },
+          onclick: (e) => callSafetyCar(e.target, d),
         }, 'safety car') },
     ],
   }));
@@ -276,6 +276,24 @@ async function refreshLive() {
       cls: e.level === 'warn' ? 'warn' : '',
       cells: [{ v: clock(e.ts), class: 'faint num' }, { v: e.message }],
     })), 'Nothing yet', 2);
+}
+
+// The grid only redraws this button when its markup changes, and a refused
+// call changes nothing, so it has to be re-enabled here or it stays dead.
+async function callSafetyCar(btn, d) {
+  btn.disabled = true;
+  let msg;
+  try {
+    const r = await api.post(`/api/vsc/${d.car_id}`);
+    msg = r.started ? '' : `safety car for ${d.name} refused: ${r.reason}`;
+  } catch {
+    msg = `safety car for ${d.name} failed: request error`;
+  } finally {
+    btn.disabled = false;
+  }
+  $('#sc-msg').textContent = msg;
+  if (msg) setTimeout(() => { if ($('#sc-msg').textContent === msg) $('#sc-msg').textContent = ''; }, 8000);
+  refreshLive();
 }
 
 function setText(sel, v) {

@@ -207,18 +207,12 @@ async def api_vsc_grant(request: web.Request) -> web.Response:
     car_id = int(request.match_info["car_id"])
     d = engine.drivers.get(car_id)
     if d is None:
-        return web.json_response({"error": "no such car"}, status=404)
-    if engine.vsc is not None:
-        return web.json_response({"error": "a phase is already running"}, status=409)
-    # An admin override ignores the per-race budget.
-    d.vsc_uses = 0
-    if engine.session_id is not None:
-        store.x(
-            "DELETE FROM vsc_used WHERE session_id=? AND guid=?",
-            (engine.session_id, d.guid),
-        )
-    engine.handle_vsc(car_id)
-    return web.json_response({"ok": True, "started": engine.vsc is not None})
+        return web.json_response({"started": False, "reason": "no such car"}, status=404)
+    # An admin override ignores the per-race budget, but every other rule holds.
+    reason = engine.handle_vsc(car_id, admin=True)
+    if reason:
+        store.log("warn", f"safety car for {d.name} refused: {reason}")
+    return web.json_response({"started": reason is None, "reason": reason})
 
 
 async def api_vsc_end(request: web.Request) -> web.Response:

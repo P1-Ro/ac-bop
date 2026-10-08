@@ -544,14 +544,20 @@ class Engine(asyncio.DatagramProtocol):
 
     # -- safety car -------------------------------------------------------
 
-    def handle_vsc(self, car_id: int) -> None:
+    def handle_vsc(self, car_id: int, admin: bool = False) -> str | None:
+        """Start a phase for this car. Returns why it was refused, or None.
+
+        ``admin`` is a call from the GUI: it ignores the per-race budget, and a
+        refusal goes back to the admin rather than to a driver who never asked.
+        """
         d = self.drivers.get(car_id)
         if d is None:
-            return
-        reason = self._vsc_refusal(d)
+            return "no such car"
+        reason = self._vsc_refusal(d, ignore_budget=admin)
         if reason:
-            self.whisper(car_id, f"Safety car unavailable: {reason}")
-            return
+            if not admin:
+                self.whisper(car_id, f"Safety car unavailable: {reason}")
+            return reason
 
         cfg = self.cfg
         now = time.time()
@@ -588,8 +594,9 @@ class Engine(asyncio.DatagramProtocol):
         )
         log.info("VSC phase: caller=%s gap=%.1fs eta=%s", d.name, gap, when)
         self.tick_vsc()  # apply immediately rather than waiting a tick
+        return None
 
-    def _vsc_refusal(self, d: Driver) -> str | None:
+    def _vsc_refusal(self, d: Driver, ignore_budget: bool = False) -> str | None:
         cfg = self.cfg
         if not cfg.vsc_enabled:
             return "disabled"
@@ -599,10 +606,11 @@ class Engine(asyncio.DatagramProtocol):
             return "race sessions only"
         if self.vsc is not None:
             return "one is already running"
-        if d.vsc_uses >= cfg.vsc_per_session:
-            return "already used this race"
-        if self.session_id is not None and self.store.vsc_was_used(self.session_id, d.guid):
-            return "already used this race"
+        if not ignore_budget:
+            if d.vsc_uses >= cfg.vsc_per_session:
+                return "already used this race"
+            if self.session_id is not None and self.store.vsc_was_used(self.session_id, d.guid):
+                return "already used this race"
         if d.laps_done < cfg.vsc_min_lap - 1:
             return f"not before lap {cfg.vsc_min_lap}"
         if cfg.vsc_forbid_final_lap and self.session.laps:
