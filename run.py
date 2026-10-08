@@ -14,6 +14,7 @@ from aiohttp import web
 from acbop.config import Config
 from acbop.db import Store
 from acbop.engine import Engine
+from acbop.version import describe
 from acbop.web import build_app
 
 
@@ -40,8 +41,8 @@ async def main_async(cfg: Config, cfg_path: str) -> None:
     site = web.TCPSite(runner, cfg.web_host, cfg.web_port)
     await site.start()
 
-    logging.info("web GUI on http://%s:%s", cfg.web_host, cfg.web_port)
-    store.log("info", "acbop started")
+    logging.info("acbop %s, web GUI on http://%s:%s", describe(), cfg.web_host, cfg.web_port)
+    store.log("info", f"acbop {describe()} started")
 
     bg = asyncio.create_task(engine.run_background())
 

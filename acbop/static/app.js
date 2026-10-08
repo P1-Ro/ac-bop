@@ -168,19 +168,34 @@ function show(tab) {
   timer = setInterval(() => { if (current === 'live') refreshLive(); }, 1500);
 }
 
+/** Header: connection light plus the version the server is running. */
+function setStatus(s) {
+  $('#dot').className = 'dot ' + (s.connected ? 'live' : 'dead');
+  $('#conn').textContent = s.connected
+    ? `server ok · ${s.last_packet_age}s ago`
+    : 'no packets from AC server';
+  const b = s.build;
+  if (!b) return;
+  setText('#build', b.commit ? `v${b.version} · ${b.commit}` : `v${b.version}`);
+  const when = (t) => new Date(t).toLocaleString();
+  $('#build').title = [
+    `acbop ${b.version}`,
+    b.commit ? `commit ${b.commit}` + (b.commit_date ? ` from ${when(b.commit_date)}` : '')
+      : 'commit unknown (not deployed from a git checkout)',
+    `running since ${when(b.started * 1000)}`,
+  ].join('\n');
+}
+
+function setUnreachable() {
+  $('#dot').className = 'dot dead';
+  $('#conn').textContent = 'api unreachable';
+}
+
 /** Keep the header's connection light honest on every tab, cheaply. */
 async function pollStatus() {
   if (current === 'live') return; // refreshLive already does it
-  try {
-    const s = await api.get('/api/state');
-    $('#dot').className = 'dot ' + (s.connected ? 'live' : 'dead');
-    $('#conn').textContent = s.connected
-      ? `server ok · ${s.last_packet_age}s ago`
-      : 'no packets from AC server';
-  } catch {
-    $('#dot').className = 'dot dead';
-    $('#conn').textContent = 'api unreachable';
-  }
+  try { setStatus(await api.get('/api/state')); }
+  catch { setUnreachable(); }
 }
 setInterval(pollStatus, 5000);
 
@@ -203,12 +218,9 @@ function stateCell(d, vsc) {
 async function refreshLive() {
   let s;
   try { s = await api.get('/api/state'); }
-  catch { $('#dot').className = 'dot dead'; $('#conn').textContent = 'api unreachable'; return; }
+  catch { setUnreachable(); return; }
 
-  $('#dot').className = 'dot ' + (s.connected ? 'live' : 'dead');
-  $('#conn').textContent = s.connected
-    ? `server ok · ${s.last_packet_age}s ago`
-    : 'no packets from AC server';
+  setStatus(s);
 
   setText('#s-type', s.session ? s.session.type : '—');
   setText('#s-track', s.session ? s.session.track : '—');

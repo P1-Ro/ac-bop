@@ -55,6 +55,8 @@ nav button.on { color: var(--bg); background: var(--accent); font-weight: 600; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
 .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .dot.dead { background: var(--red); }
+.build { color: var(--faint); padding-left: 10px; border-left: 1px solid var(--line); white-space: nowrap; }
+.build:empty { display: none; }
 
 main { padding: 20px; max-width: 1480px; margin: 0 auto; }
 .tab { display: none; }
@@ -123,7 +125,7 @@ td.held-val { color: var(--orange); }
 
 /* One colour per rejection reason, so the Laps tab is scannable. */
 .pill.r-cut     { color: var(--red);    border-color: #4d1f21; background: #22100f; }
-.pill.r-outlap  { color: var(--cyan);   border-color: #14504a; background: #0a211f; }
+.pill.r-outlap  { color: var(--orange); border-color: #5c3317; background: #231609; }
 .pill.r-contact { color: var(--purple); border-color: #3c2363; background: #170f26; }
 .pill.r-sc      { color: var(--blue);   border-color: #1f3a63; background: #0f1826; }
 .pill.r-bad     { color: var(--faint);  border-color: var(--line); background: var(--panel-2); }
@@ -140,7 +142,7 @@ td.held-val { color: var(--orange); }
 .chip.on { outline: 1px solid currentColor; outline-offset: 1px; }
 .chip.ok { color: var(--green); }
 .chip.r-cut { color: var(--red); }
-.chip.r-outlap { color: var(--cyan); }
+.chip.r-outlap { color: var(--orange); }
 .chip.r-contact { color: var(--purple); }
 .chip.r-sc { color: var(--blue); }
 

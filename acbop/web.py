@@ -14,6 +14,7 @@ from aiohttp import web
 from .config import Config
 from .db import Store
 from .engine import Engine
+from .version import BUILD
 
 log = logging.getLogger("acbop.web")
 
@@ -73,6 +74,7 @@ async def api_state(request: web.Request) -> web.Response:
     store: Store = request.app["store"]
     state = engine.state()
     state["events"] = rows(store.recent_events(30))
+    state["build"] = BUILD
     return web.json_response(state)
 
 
