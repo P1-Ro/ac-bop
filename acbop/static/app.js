@@ -241,6 +241,16 @@ $$('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset
 
 function stateCell(d, vsc) {
   if (d.vsc_caller) return pill('CLOSING UP', 'vsc', 'Called the safety car — running with no handicap');
+  if (d.vsc_limited) {
+    const limit = vsc && vsc.limit_kmh ? `${Math.round(vsc.limit_kmh)} km/h` : 'speed cap';
+    if (d.vsc_extra_restrictor > 0) {
+      return pill(`RESTRICTED +${Math.round(d.vsc_extra_restrictor)}%`, 'held',
+        `Did not slow to the ${limit} cap, so the in-game limiter is evidently missing: ` +
+        'held with the restrictor instead');
+    }
+    return pill(`LIMITED ${limit}`, 'held',
+      `Held by the in-game limiter at ${limit} until the safety car ends`);
+  }
   if (d.vsc_slowed) {
     const running = d.vsc_measured_pct === null
       ? 'pace still being measured'
@@ -695,8 +705,20 @@ const GROUPS = [
     ['vsc_enabled', 'Enabled',
       'Whether drivers can call a safety car at all.', ''],
     ['vsc_command', 'Chat command',
-      'What a driver types in chat to call one.',
+      'What a driver types in chat to call one. The CMRT HUD button sends this too.',
       'Keep the leading "!" — a "/" prefix would be eaten by the server as an unknown admin command.'],
+    ['vsc_mode', 'How cars are held',
+      '"limiter": a CSP script on every client caps held cars at the speed limit below, like a pit limiter. "restrictor": server-side only, using the restrictor as a pace limiter.',
+      'Limiter needs the script line in csp_extra_options.ini (see README) and closes gaps several times faster. Restrictor works with no client setup but tops out at 100%, roughly 20% of lap time.'],
+    ['vsc_speed_limit_kmh', 'Speed limit (km/h)',
+      'Limiter mode: the speed cap for every held car.',
+      'Lower closes the gap faster. Corners slower than this are unaffected, so on a tight track it needs to be lower to bite.'],
+    ['vsc_limiter_tolerance_kmh', 'Limiter tolerance (km/h)',
+      'Limiter mode: a held car still this far over the cap after the grace period, for 3 seconds, is held with the restrictor instead.',
+      'The safety net for a driver without the client script. Too low and a car over a crest could trip it.'],
+    ['vsc_limiter_grace_s', 'Limiter grace (s)',
+      'Limiter mode: how long held cars get to slow down before the safety net checks them.',
+      'The in-game limiter eases cars down at about 12 km/h per second, so allow for the fastest straight.'],
     ['vsc_max_slowdown', 'Hold strength',
       'How much slower than the caller the held cars are limited to, as a fraction of the caller’s own unhandicapped lap time. 0.6 means a lap 60% slower.',
       'This is the main lever on how fast the field comes back together: 0.6 closes about 0.37s of gap per second of running, so a 20s gap takes roughly 50s. Higher closes faster but the held cars crawl.'],

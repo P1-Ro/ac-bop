@@ -51,6 +51,7 @@ async def build(cfg_over: dict | None = None, port_base: int = 12451):
         vsc_tick_s=0.2,
         vsc_max_slowdown=0.60,
         deadband_restrictor=0.5, deadband_ballast=2.0,
+        vsc_mode="restrictor",
         **(cfg_over or {}),
     )
     store = Store(cfg.db_path)

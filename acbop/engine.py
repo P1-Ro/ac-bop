@@ -75,6 +75,8 @@ class Driver:
     vsc_target_ms: float = 0.0
     # Measured fractional pace loss versus their own normal pace, live.
     vsc_measured_slow: float | None = None
+    # Held by the client-side speed limiter (limiter mode).
+    vsc_limited: bool = False
     # Set while this driver is the one who called the phase.
     vsc_is_caller: bool = False
 
@@ -97,7 +99,7 @@ class Driver:
 
     @property
     def in_vsc(self) -> bool:
-        return self.vsc_is_caller or self.vsc_target_ms > 0
+        return self.vsc_is_caller or self.vsc_target_ms > 0 or self.vsc_limited
 
     def to_json(self) -> dict:
         return {
@@ -116,7 +118,8 @@ class Driver:
             "spline": round(self.spline, 4),
             "speed_kmh": round(self.speed_kmh, 1),
             "vsc_caller": self.vsc_is_caller,
-            "vsc_slowed": self.vsc_target_ms > 0,
+            "vsc_slowed": self.vsc_target_ms > 0 or self.vsc_limited,
+            "vsc_limited": self.vsc_limited,
             "vsc_extra_restrictor": round(self.vsc_extra_restrictor, 1),
             "vsc_target_ms": round(self.vsc_target_ms),
             "vsc_measured_pct": (
@@ -160,6 +163,10 @@ class VscPhase:
     # bad position reading cannot cancel it.
     ending: str | None = None
     ending_since: float = 0.0
+    # Limiter mode: when each held car was first seen over the cap, and the
+    # cars that never slowed and are held with the restrictor instead.
+    overspeed_since: dict = field(default_factory=dict)
+    fallback: set = field(default_factory=set)
 
     def ramp(self, now: float, ramp_s: float) -> float:
         """Ease in at the start and out as the deadline approaches."""
@@ -732,8 +739,13 @@ class Engine(asyncio.DatagramProtocol):
             if eta is not None
             else f"up to {cfg.vsc_max_duration_s:.0f}s"
         )
+        held = (
+            f"limited to {cfg.vsc_speed_limit_kmh:.0f} km/h"
+            if cfg.vsc_mode == "limiter"
+            else "pace-limited"
+        )
         self.broadcast(
-            f"SAFETY CAR: {d.name} is {gap:.0f}s back. Cars ahead are pace-limited "
+            f"SAFETY CAR: {d.name} is {gap:.0f}s back. Cars ahead are {held} "
             f"until the gap is under {cfg.vsc_target_gap_s:.0f}s ({when})."
         )
         self.store.log(
@@ -769,9 +781,10 @@ class Engine(asyncio.DatagramProtocol):
             return "you are leading"
         if gap < cfg.vsc_min_gap_s:
             return f"gap is only {gap:.1f}s (need {cfg.vsc_min_gap_s:.0f}s)"
-        rate = self.vsc_closure_rate(d)
-        if rate is None or rate < 0.02:
-            return "the cars ahead cannot be slowed enough to close the gap"
+        if cfg.vsc_mode != "limiter":
+            rate = self.vsc_closure_rate(d)
+            if rate is None or rate < 0.02:
+                return "the cars ahead cannot be slowed enough to close the gap"
         return None
 
     def _vsc_sensitivity(self) -> tuple[float, float]:
@@ -871,7 +884,15 @@ class Engine(asyncio.DatagramProtocol):
         Seconds of gap the caller gains per second of running. Physics, not a
         guess: if the car ahead laps in T while the caller laps in t, the
         caller gains (T - t) / T seconds for every second of running.
+
+        A speed cap has no such formula, so in limiter mode this is measured
+        from the gap actually closed so far.
         """
+        if self.cfg.vsc_mode == "limiter":
+            phase = self.vsc
+            if phase is None or phase.caller_car_id != caller.car_id or phase.elapsed < 5.0:
+                return None
+            return (phase.start_gap_s - phase.last_gap_s) / phase.elapsed
         ahead = [
             o for o in self.drivers.values()
             if o.loaded and o is not caller and o.progress > caller.progress
@@ -978,6 +999,10 @@ class Engine(asyncio.DatagramProtocol):
         if gap is None:
             return  # waiting to confirm; keep the hold exactly as it is
 
+        if cfg.vsc_mode == "limiter":
+            self._tick_vsc_limiter(phase, caller, now)
+            return
+
         ramp = phase.ramp(now, cfg.vsc_ramp_s)
         dt = now - phase.last_tick if phase.last_tick else 0.0
         phase.last_tick = now
@@ -1044,6 +1069,95 @@ class Engine(asyncio.DatagramProtocol):
                 deadband_r=max(cfg.deadband_restrictor, cfg.vsc_deadband_restrictor),
             )
 
+    def _tick_vsc_limiter(self, phase: VscPhase, caller: Driver, now: float) -> None:
+        """
+        Limiter mode: the client script does the holding. All acbop does is
+        decide who is held (published on /csp/state) and catch any car that
+        plainly is not being limited, holding it with the restrictor instead.
+        """
+        cfg = self.cfg
+        caller.vsc_extra_restrictor = 0.0
+        caller.vsc_limited = False
+        self._push(caller, 0.0, 0.0)
+
+        held = self._vsc_slowdowns(caller)
+        cap = cfg.vsc_speed_limit_kmh + cfg.vsc_limiter_tolerance_kmh
+        for o in self.drivers.values():
+            if o is caller or not o.loaded:
+                continue
+            if o.car_id not in held:
+                if o.vsc_limited or o.vsc_extra_restrictor:
+                    o.vsc_limited = False
+                    o.vsc_extra_restrictor = 0.0
+                    self._push(o, o.base_restrictor, o.base_ballast, force=True)
+                phase.overspeed_since.pop(o.car_id, None)
+                continue
+            o.vsc_limited = True
+
+            if now - phase.started >= cfg.vsc_limiter_grace_s and o.speed_kmh > cap:
+                since = phase.overspeed_since.setdefault(o.car_id, now)
+                if now - since >= 3.0 and o.car_id not in phase.fallback:
+                    phase.fallback.add(o.car_id)
+                    self.whisper(
+                        o.car_id,
+                        f"Safety car: you are not slowing to {cfg.vsc_speed_limit_kmh:.0f} km/h, "
+                        "so you are being held with the restrictor.",
+                    )
+                    self.store.log(
+                        "warn",
+                        f"safety car: {o.name} ignored the {cfg.vsc_speed_limit_kmh:.0f} km/h "
+                        "limit (client script missing?); holding with restrictor",
+                    )
+            else:
+                phase.overspeed_since.pop(o.car_id, None)
+
+            if o.car_id in phase.fallback:
+                extra = max(0.0, cfg.vsc_max_restrictor - o.base_restrictor)
+                if o.vsc_extra_restrictor != extra:
+                    o.vsc_extra_restrictor = extra
+                    self._push(o, o.base_restrictor + extra, o.base_ballast, force=True)
+
+    def csp_state(self) -> dict:
+        """
+        What the in-game scripts poll: who is held and at what speed, and
+        every car's handicap for the leaderboard. Public, so kept to what
+        every driver can already see in-game.
+        """
+        vsc = None
+        phase = self.vsc
+        if phase is not None:
+            vsc = {
+                "caller": phase.caller_car_id,
+                "caller_name": (
+                    c.name if (c := self.drivers.get(phase.caller_car_id)) else ""
+                ),
+                "held": sorted(
+                    d.car_id for d in self.drivers.values() if d.vsc_limited or d.vsc_target_ms > 0
+                ),
+                "mode": self.cfg.vsc_mode,
+                "limit_kmh": self.cfg.vsc_speed_limit_kmh,
+                "gap": round(phase.last_gap_s, 1),
+                "target_gap": round(phase.target_gap_s, 1),
+                "remaining": round(max(0.0, phase.deadline - time.time()), 1),
+            }
+        return {
+            "v": 1,
+            "cmd": self.cfg.vsc_command,
+            "enabled": self.cfg.vsc_enabled,
+            "vsc": vsc,
+            "cars": [
+                {
+                    "id": d.car_id,
+                    "name": d.name,
+                    "r": round(d.restrictor, 1),
+                    "b": round(d.ballast),
+                    "base_r": round(d.base_restrictor, 1),
+                    "base_b": round(d.base_ballast),
+                }
+                for d in self.drivers.values()
+            ],
+        }
+
     def _end_vsc(self, why: str) -> None:
         phase = self.vsc
         self.vsc = None
@@ -1054,6 +1168,7 @@ class Engine(asyncio.DatagramProtocol):
             d.vsc_extra_restrictor = 0.0
             d.vsc_target_ms = 0.0
             d.vsc_measured_slow = None
+            d.vsc_limited = False
             if d.loaded:
                 self._push(d, d.base_restrictor, d.base_ballast, force=True)
             # Lap times were meaningless during the phase; make the next one
@@ -1128,6 +1243,8 @@ class Engine(asyncio.DatagramProtocol):
             "vsc": (
                 dict(
                     self.vsc.to_json(),
+                    mode=self.cfg.vsc_mode,
+                    limit_kmh=self.cfg.vsc_speed_limit_kmh,
                     eta=(
                         round(e, 1)
                         if (c := self.drivers.get(self.vsc.caller_car_id)) is not None

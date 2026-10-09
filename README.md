@@ -88,21 +88,34 @@ a funnel accounting for every single recorded lap so nothing can go missing quie
 ### The safety car
 
 Vanilla acServer has no safety car and no speed limiter, and the plugin protocol cannot
-set one: the only levers a server plugin has are `/ballast` and `/restrictor`. A true
-pit-style limiter would need a script running on every driver's PC (CSP Lua), which
-this project deliberately avoids. So the safety car is a **pace limiter built from the
-restrictor alone**. It never adds ballast. Everyone carries a **floor** (default 6% /
-25 kg), which leaves headroom to go *down*.
+set one: the only levers a server plugin has are `/ballast` and `/restrictor`. So there
+are two ways to hold the cars ahead, chosen with `vsc_mode`:
 
-Typing `!vsc` starts a live phase:
+- **`limiter`** (default): a real speed cap, like a pit limiter. acbop serves a small
+  CSP script that the server pushes to every player's game, and that script holds the
+  car at `vsc_speed_limit_kmh` while it is being held. See
+  [In-game limiter](#in-game-limiter-csp) for the one-line server setup. A car that
+  plainly is not being limited (no CSP, script missing) is caught after a grace period
+  and held with the restrictor instead.
+- **`restrictor`**: no client setup at all. The restrictor alone is used as a pace
+  limiter, described below. It never adds ballast, but a vanilla server caps it at 100%,
+  which is only worth about 20% of lap time, so it closes gaps several times more slowly.
+
+Everyone carries a **floor** (default 6% / 25 kg), which leaves headroom to go *down*:
+the caller drops it.
+
+Typing `!vsc` (or pressing the bound button in the CMRT HUD) starts a live phase:
 
 - the **caller** runs with no handicap at all
-- every car **ahead** is limited to the same target lap time: the caller's own
-  unhandicapped pace × (1 + `vsc_max_slowdown`)
+- every car **ahead** is held: capped at `vsc_speed_limit_kmh` in limiter mode, or in
+  restrictor mode limited to the same target lap time, the caller's own unhandicapped
+  pace × (1 + `vsc_max_slowdown`)
 - gaps are re-measured every second and the whole thing is recomputed from live
   positions
 - it ends the moment the caller is within `vsc_target_gap_s` of the car ahead, or at the
   hard time limit
+
+#### Restrictor mode
 
 **The restrictor is set per driver, from their pace.** A quick driver needs more
 restrictor than a slow one to reach the same target. Each held car's starting value
@@ -145,6 +158,58 @@ during a phase is excluded from the model, and the lap after it ends is treated 
 out-lap.
 
 Other chat commands: `!bop` shows your handicap, `!gap` the gap ahead, `!help` lists them.
+
+### In-game limiter (CSP)
+
+During an online race CSP only lets a **server-provided** script touch a car's throttle
+and brakes; an app a player installs may not. So the limiter is an online script, served
+by acbop and pushed by the server to every player. Add this to the server's
+`cfg/csp_extra_options.ini` (or the CSP extra options box in Content Manager's server
+settings), with the address players can reach acbop's web port on:
+
+```ini
+[SCRIPT_1]
+SCRIPT = 'http://your.server.address:8770/csp/vsc.lua?car={SessionID}'
+REQUIRED = 1
+```
+
+`{SessionID}` is filled in by the game with the player's slot, which is how the script
+knows which car it is. `REQUIRED = 1` stops anyone joining without it. The web port has to
+be open to players, but only `/csp/` is reachable without the GUI password: the script
+itself, and `/csp/state`, a read-only list of who is held plus every car's ballast and
+restrictor, nothing players cannot already see in-game.
+
+While a car is held, the script lifts the throttle as it approaches the cap and adds a
+gentle brake (at most 35%) only well past it. The cap closes in from the car's own
+speed at 12 km/h per second, so nobody is slammed down from top speed. It never adds
+throttle the driver is not asking for, and never touches the caller or the cars behind
+them. A yellow "VIRTUAL SAFETY CAR" banner tells each driver the limit, or tells the
+caller to catch up. If acbop stops answering for a few seconds, the script lets go.
+
+Using the CSP physics functions marks the lap invalid, which is fine: laps under a safety
+car are excluded anyway.
+
+### The CMRT HUD
+
+A modified CMRT Essential HUD (v1.0.13 + acbop) adds two things for drivers:
+
+- The **leaderboard** shows each driver's ballast and restrictor, from acbop, next to
+  their name. While a safety car runs, held cars are shown in yellow, the caller in
+  green, and the flag area reads VIRTUAL SAFETY CAR.
+- A **rebindable button** calls a safety car (Settings → Safety car tab: click the box,
+  then press any key or wheel button). It sends the same chat command, so every rule
+  above still applies.
+
+The HUD finds acbop from the `[SCRIPT_...]` line above, or from an explicit entry in
+`csp_extra_options.ini`; failing both, type the address in the Safety car tab:
+
+```ini
+[ACBOP]
+URL = 'http://your.server.address:8770'
+```
+
+The HUD only displays and asks. The limiting is done by the online script, so a driver
+without the HUD is still held.
 
 ### Recompute vs Re-apply
 
@@ -282,6 +347,8 @@ by a poll.
 python3 tests/test_convergence.py       # does the field actually converge
 python3 tests/test_track_variation.py   # per-track sensitivity and driver affinity
 python3 tests/test_safetycar.py         # does the caller actually catch the pack
+python3 tests/test_vsc_limiter.py       # limiter mode, its safety net and /csp/ endpoints
+python3 tests/test_csp_script.py        # the in-game script under LuaJIT (needs: pip install lupa)
 ```
 
 These spin up a fake AC server that speaks ACSP over a real UDP socket and drive the
