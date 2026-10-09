@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 import time
 from hashlib import sha256
 from pathlib import Path
@@ -19,6 +20,7 @@ from .version import BUILD
 log = logging.getLogger("acbop.web")
 
 STATIC = Path(__file__).parent / "static"
+CSP_SCRIPT = Path(__file__).parent / "csp" / "vsc.lua"
 COOKIE = "acbop_auth"
 
 
@@ -32,6 +34,10 @@ async def auth_middleware(request: web.Request, handler):
     if not cfg.web_password:
         return await handler(request)
     if request.path in ("/login", "/static/style.css"):
+        return await handler(request)
+    # What every player's game fetches: the in-game script and the public
+    # state it polls. Read-only, and nothing a driver cannot see in-game.
+    if request.path.startswith("/csp/"):
         return await handler(request)
     expected = _token(cfg.web_password)
     given = request.cookies.get(COOKIE) or request.headers.get("X-ACBOP-Key", "")
@@ -230,6 +236,37 @@ async def api_vsc_end(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def csp_state(request: web.Request) -> web.Response:
+    engine: Engine = request.app["engine"]
+    return web.json_response(engine.csp_state(), headers={"Cache-Control": "no-store"})
+
+
+_SAFE_HOST = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$")
+
+
+async def csp_script(request: web.Request) -> web.Response:
+    """
+    The in-game limiter, with this server's address and the requesting car's
+    slot baked in. The game asks for it as /csp/vsc.lua?car={SessionID}, so
+    the address is whatever the player could reach us on.
+    """
+    host = request.host if _SAFE_HOST.match(request.host or "") else "127.0.0.1"
+    try:
+        car = int(request.query.get("car", "-1"))
+    except ValueError:
+        car = -1
+    if not -1 <= car <= 255:
+        car = -1
+    body = (
+        CSP_SCRIPT.read_text()
+        .replace("__ACBOP_STATE_URL__", f"http://{host}/csp/state")
+        .replace("__ACBOP_CAR_ID__", str(car))
+    )
+    return web.Response(
+        text=body, content_type="text/plain", headers={"Cache-Control": "no-store"}
+    )
+
+
 async def api_events(request: web.Request) -> web.Response:
     store: Store = request.app["store"]
     return web.json_response(rows(store.recent_events(int(request.query.get("limit", 200)))))
@@ -266,6 +303,8 @@ def build_app(cfg: Config, store: Store, engine: Engine, cfg_path: str) -> web.A
             web.post("/api/vsc/{car_id}", api_vsc_grant),
             web.delete("/api/vsc", api_vsc_end),
             web.get("/api/events", api_events),
+            web.get("/csp/state", csp_state),
+            web.get("/csp/vsc.lua", csp_script),
             web.static("/static", STATIC),
         ]
     )

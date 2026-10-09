@@ -94,6 +94,21 @@ class Config:
     # gaps, and it ends as soon as the caller has closed to the target gap.
     vsc_enabled: bool = True
     vsc_command: str = "!vsc"
+    # How the cars being held are slowed:
+    #   "limiter"    — a CSP script on every client caps their speed at
+    #                  vsc_speed_limit_kmh, like a pit limiter. acbop serves the
+    #                  script; add it to csp_extra_options.ini (see README).
+    #   "restrictor" — server-side only, no client script: the restrictor is
+    #                  used as a pace limiter. Works on any client, but 100% is
+    #                  only worth about 20% of lap time, so it closes slowly.
+    vsc_mode: str = "limiter"
+    # Speed cap for held cars in limiter mode.
+    vsc_speed_limit_kmh: float = 100.0
+    # Safety net for limiter mode: a held car still more than this over the
+    # cap after the grace period, for 3 seconds running, has evidently not
+    # got the client script, and is held with the restrictor instead.
+    vsc_limiter_tolerance_kmh: float = 15.0
+    vsc_limiter_grace_s: float = 10.0
     vsc_max_duration_s: float = 180.0  # hard ceiling even if the gap never closes
     vsc_target_gap_s: float = 3.0      # phase ends once this close to the car ahead
     vsc_min_gap_s: float = 8.0         # must be this far behind to call it
