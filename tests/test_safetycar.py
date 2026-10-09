@@ -44,7 +44,7 @@ async def build(cfg_over: dict | None = None, port_base: int = 12451):
         announce_handicaps=False,
         min_laps_for_rating=3,
         floor_restrictor=6.0, floor_ballast=25.0,
-        vsc_max_duration_s=120.0,
+        vsc_max_duration_s=180.0,
         vsc_target_gap_s=3.0,
         vsc_min_gap_s=8.0,
         vsc_ramp_s=2.0,
@@ -147,9 +147,9 @@ async def main() -> int:
     await srv.run_session("mugello", BASE_MS, n_laps=4, cuts_rate=0.0, declared_laps=60)
     await srv.pump(0.3)
 
-    # Spread the field: leader well clear, "Last" ~20s back of Third, then
+    # Spread the field: leader well clear, "Last" ~12s back of Third, then
     # race a lap and a half so everyone has a live lap profile.
-    layout = {0: 0.95, 1: 0.70, 2: 0.45, 3: 0.24}
+    layout = {0: 0.95, 1: 0.70, 2: 0.45, 3: 0.32}
     for cid, sp in layout.items():
         engine.drivers[cid].laps_done = 3
         sims[cid].spline = sp
@@ -184,39 +184,41 @@ async def main() -> int:
 
     # ------------------------------- does the gap ACTUALLY close? ---------
     print("\n  simulating running under the phase:")
-    print(f"  {'t':>5} {'gap':>7}   extra restrictor / measured vs target pace")
+    print(f"  {'t':>5} {'gap':>7}   total restrictor (measured slowdown)")
     gaps = [gap0]
     ballast_touched = []
     pace_err: dict[int, list[float]] = {c: [] for c in (0, 1, 2)}
     shown = [-99.0]
-    trims: dict[int, float] = {}
+    over_cap: list[int] = []
+    peak_r = {c: 0.0 for c in (0, 1, 2)}
 
     def step(t: float):
         if engine.vsc is None:
             return False
-        trims.update(engine.vsc.trims)
         for c in (0, 1, 2):
             if abs(sims[c].ballast - base[c][1]) > 0.5:
                 ballast_touched.append((c, sims[c].ballast))
+            over_cap.extend([c] if engine.drivers[c].restrictor > 100.0 else [])
+            peak_r[c] = max(peak_r[c], sims[c].restrictor)
             d = engine.drivers[c]
-            if t > 20.0 and d.vsc_target_ms:
+            if t > 25.0 and d.vsc_target_ms:
                 s = sims[c]
                 true_lap = BASE_MS * math.exp(s.skill) * (1.0 + true_loss(s))
                 pace_err[c].append(true_lap / d.vsc_target_ms - 1.0)
         g = engine.gap_ahead_seconds(last)
         if g is not None:
             gaps.append(g)
-            if t - shown[0] >= 8.0:
+            if t - shown[0] >= 12.0:
                 shown[0] = t
                 held = " ".join(
-                    f"+{sims[c].restrictor - base[c][0]:3.0f}%"
+                    f"{sims[c].restrictor:4.0f}%"
                     f"({(engine.drivers[c].vsc_measured_slow or 0) * 100:+.0f}%)"
                     for c in (0, 1, 2)
                 )
                 print(f"  {t:5.1f} {g:6.1f}s   {held}")
         return True
 
-    ran = await drive(engine, srv, sims, 90.0, on_step=step)
+    ran = await drive(engine, srv, sims, 170.0, on_step=step)
 
     print(f"\n  gap {gaps[0]:.1f}s -> {gaps[-1]:.1f}s in {ran:.0f}s of running")
     check(not ballast_touched,
@@ -227,7 +229,7 @@ async def main() -> int:
           f"target {cfg.vsc_target_gap_s:.0f}s)")
     check(all(gaps[i + 1] <= gaps[i] + 0.4 for i in range(len(gaps) - 1)),
           "gap closed monotonically (no oscillation)")
-    check(eta is not None and abs(eta - ran) < 0.25 * ran,
+    check(eta is not None and abs(eta - ran) < 0.35 * ran,
           f"the predicted ETA held up ({eta:.0f}s predicted, {ran:.0f}s actual)")
 
     # Every held car is driven to the same target pace, whatever its own
@@ -239,11 +241,14 @@ async def main() -> int:
         check(abs(mean) < 0.06,
               f"{sims[c].name} held to the target pace ({mean * 100:+.1f}% off once settled)")
 
-    # The model's linear estimate under-delivers on this restrictor; the live
-    # correction must have pushed every held car past it.
-    check(all(t > 0 for t in trims.values()) and len(trims) == 3,
-          "live correction added restrictor where the model estimate fell short: "
-          + ", ".join(f"{sims[c].name} {t:+.0f}%" for c, t in sorted(trims.items())))
+    check(not over_cap, "the restrictor never exceeds a vanilla server's 100% cap")
+    # With the restrictor capped, the quickest held car at full restrictor sets
+    # the pace, and slower drivers get only enough to match it.
+    check(peak_r[0] >= 99.0,
+          f"the quickest held car runs at the ceiling ({peak_r[0]:.0f}%)")
+    check(peak_r[2] < peak_r[0] - 5,
+          f"a slower held car carries less to reach the same pace "
+          f"(Third {peak_r[2]:.0f}% vs Leader {peak_r[0]:.0f}%)")
 
     sent = sum(1 for cmd in srv.admin_log if cmd.startswith("/restrictor 0 "))
     check(sent < 25, f"the limiter is not spamming commands (leader got {sent})")

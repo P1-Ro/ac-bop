@@ -733,7 +733,7 @@ const GROUPS = [
       'Lower reacts faster but sends more admin commands, each of which pops a notification for the affected driver.'],
     ['vsc_max_restrictor', 'Limiter ceiling (%)',
       'The most restrictor a held car may carry, its normal handicap included. The safety car never adds ballast.',
-      'AC accepts up to 400%. Lower it if your server caps the admin command lower, or if your cars become undriveable before reaching the target pace.'],
+      'A vanilla acServer caps the restrictor at 100%, which is worth roughly 20% of lap time. The quickest held car at this ceiling sets the pace for the group. Raise it only if your server manager accepts more.'],
     ['vsc_limiter_gain', 'Limiter correction speed',
       'How hard each held car’s restrictor is corrected toward the target pace, per second, from their measured live pace.',
       'Higher locks on faster but can overshoot and send more commands. 0 turns the correction off and relies on the model’s estimate alone, which tends to under-deliver at high restrictor.'],

@@ -189,7 +189,8 @@ class SimServer:
         if verb == "/ballast":
             d.ballast = val
         elif verb == "/restrictor":
-            d.restrictor = val
+            # A vanilla acServer clamps the restrictor at 100%.
+            d.restrictor = min(100.0, val)
 
     # -- scripted session ------------------------------------------------
 

@@ -94,7 +94,7 @@ class Config:
     # gaps, and it ends as soon as the caller has closed to the target gap.
     vsc_enabled: bool = True
     vsc_command: str = "!vsc"
-    vsc_max_duration_s: float = 120.0  # hard ceiling even if the gap never closes
+    vsc_max_duration_s: float = 180.0  # hard ceiling even if the gap never closes
     vsc_target_gap_s: float = 3.0      # phase ends once this close to the car ahead
     vsc_min_gap_s: float = 8.0         # must be this far behind to call it
     vsc_min_lap: int = 2               # not on the opening lap
@@ -103,20 +103,23 @@ class Config:
     vsc_race_only: bool = True
     vsc_tick_s: float = 1.0            # how often gaps and penalties are redone
 
-    # How much slower than the caller the held cars are made to run. Every
-    # held car is limited to the same target lap time: the caller's own
-    # unhandicapped pace times (1 + this). 0.6 means 60% slower, which closes
-    # roughly 0.37 s of gap per second of running — a 20 s gap takes about
-    # 50 s. This is the main lever on how fast the field comes back together.
+    # How much slower than the caller the held cars are made to run, at most.
+    # Every held car is limited to the same target lap time: the caller's own
+    # unhandicapped pace times (1 + this). In practice the restrictor ceiling
+    # is what binds: 100% is worth roughly 20% of lap time, so the quickest
+    # held car at full restrictor sets the pace and everyone else is matched
+    # to it. A 20% hold closes about 0.17 s of gap per second of running, so
+    # a 20 s gap takes around 100 s. Lower this for a gentler hold.
     vsc_max_slowdown: float = 0.60
     # The hold is a pace limiter built from the restrictor alone; no ballast is
     # ever added. Each held car's restrictor is solved from that driver's own
     # pace (a quick driver needs more to reach the same target than a slow
     # one), then trimmed every tick from their measured live pace, so the
     # restrictor's non-linear bite at high values is corrected automatically.
-    # Ceiling on the total restrictor, normal handicap included. AC accepts
-    # up to 400%; lower it if your server caps the admin command lower.
-    vsc_max_restrictor: float = 400.0
+    # Ceiling on the total restrictor, normal handicap included. A vanilla
+    # acServer caps the admin command at 100%; some server managers accept
+    # more.
+    vsc_max_restrictor: float = 100.0
     # How hard the live correction pulls toward the target pace, per second.
     # Higher reacts faster but can overshoot; 0 uses the model estimate only.
     vsc_limiter_gain: float = 0.10

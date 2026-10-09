@@ -135,6 +135,9 @@ class VscPhase:
     # Live correction on top of each held car's model-estimated restrictor,
     # in restrictor percent, keyed by car_id.
     trims: dict = field(default_factory=dict)
+    # Measured slowdown a car actually reaches with the restrictor at its
+    # ceiling, keyed by car_id. Replaces the model's estimate once known.
+    reach: dict = field(default_factory=dict)
 
     def ramp(self, now: float, ramp_s: float) -> float:
         """Ease in at the start and out as the deadline approaches."""
@@ -728,6 +731,9 @@ class Engine(asyncio.DatagramProtocol):
             return "you are leading"
         if gap < cfg.vsc_min_gap_s:
             return f"gap is only {gap:.1f}s (need {cfg.vsc_min_gap_s:.0f}s)"
+        rate = self.vsc_closure_rate(d)
+        if rate is None or rate < 0.02:
+            return "the cars ahead cannot be slowed enough to close the gap"
         return None
 
     def _vsc_sensitivity(self) -> tuple[float, float]:
@@ -795,20 +801,39 @@ class Engine(asyncio.DatagramProtocol):
             for cid, g in gaps.items()
         }
 
-    def vsc_closure_eta(self, caller: Driver) -> float | None:
+    def _vsc_targets(self, caller: Driver) -> dict[int, float]:
         """
-        Seconds of running needed to bring the caller to the target gap, at the
-        current slowdown. Physics, not a guess: if the car ahead runs at
-        (1 + s) times the caller's lap time, the caller gains s/(1+s) seconds
-        for every second of running.
+        The lap time, in ms, each held car is limited to.
+
+        Wanted: the caller's free pace x (1 + hold). But the restrictor tops
+        out (100% on a vanilla server), which on most cars is only worth about
+        a fifth of lap time. So the target is also capped at the slowest pace
+        every held car can actually be brought down to: the quickest car,
+        fully restricted, sets the pace for the whole group, and everyone
+        slower gets just enough restrictor to match it.
         """
-        gap = self.gap_ahead_seconds(caller)
-        if gap is None:
-            return None
-        to_close = gap - self.cfg.vsc_target_gap_s
-        if to_close <= 0:
-            return 0.0
-        s = self._vsc_slowdowns(caller)
+        holds = self._vsc_slowdowns(caller)
+        free = self._free_pace_ms(caller)
+        kr, _ = self._vsc_sensitivity()
+        if not holds or free <= 0 or kr <= 0:
+            return {}
+        reach = self.vsc.reach if self.vsc is not None else {}
+        ceiling = float("inf")
+        for cid in holds:
+            o = self.drivers[cid]
+            own = self._own_pace_ms(o)
+            if own <= 0:
+                continue
+            room = max(0.0, self.cfg.vsc_max_restrictor - o.base_restrictor)
+            ceiling = min(ceiling, own * (1.0 + reach.get(cid, kr * room)))
+        return {cid: min(free * (1.0 + h), ceiling) for cid, h in holds.items() if h > 0}
+
+    def vsc_closure_rate(self, caller: Driver) -> float | None:
+        """
+        Seconds of gap the caller gains per second of running. Physics, not a
+        guess: if the car ahead laps in T while the caller laps in t, the
+        caller gains (T - t) / T seconds for every second of running.
+        """
         ahead = [
             o for o in self.drivers.values()
             if o.loaded and o is not caller and o.progress > caller.progress
@@ -816,10 +841,24 @@ class Engine(asyncio.DatagramProtocol):
         if not ahead:
             return None
         nearest = min(ahead, key=lambda o: o.progress - caller.progress)
-        slow = s.get(nearest.car_id, 0.0)
-        if slow <= 0:
+        target = self._vsc_targets(caller).get(nearest.car_id)
+        free = self._free_pace_ms(caller)
+        if not target or free <= 0:
             return None
-        return to_close / (slow / (1.0 + slow))
+        return (target - free) / target
+
+    def vsc_closure_eta(self, caller: Driver) -> float | None:
+        """Seconds of running needed to bring the caller to the target gap."""
+        gap = self.gap_ahead_seconds(caller)
+        if gap is None:
+            return None
+        to_close = gap - self.cfg.vsc_target_gap_s
+        if to_close <= 0:
+            return 0.0
+        rate = self.vsc_closure_rate(caller)
+        if rate is None or rate <= 0:
+            return None
+        return to_close / rate
 
     def _own_pace_ms(self, d: Driver) -> float:
         """A driver's normal lap time, carrying their normal handicap."""
@@ -900,14 +939,14 @@ class Engine(asyncio.DatagramProtocol):
 
         kr, _ = self._vsc_sensitivity()
         free_ms = self._free_pace_ms(caller)
-        holds = self._vsc_slowdowns(caller)
+        targets = self._vsc_targets(caller)
         settled_since = phase.started + cfg.vsc_ramp_s
         for o in self.drivers.values():
             if o is caller or not o.loaded:
                 continue
-            hold = holds.get(o.car_id, 0.0)
+            target_ms = targets.get(o.car_id, 0.0)
             own_ms = self._own_pace_ms(o)
-            if hold <= 0 or free_ms <= 0 or own_ms <= 0 or kr <= 0:
+            if target_ms <= 0 or free_ms <= 0 or own_ms <= 0 or kr <= 0:
                 if o.vsc_target_ms or o.vsc_extra_restrictor:
                     o.vsc_extra_restrictor = 0.0
                     o.vsc_target_ms = 0.0
@@ -915,7 +954,6 @@ class Engine(asyncio.DatagramProtocol):
                     self._push(o, o.base_restrictor, o.base_ballast, force=True)
                 continue
 
-            target_ms = free_ms * (1.0 + hold)
             # How much slower than their own normal pace this driver must run.
             need = max(0.0, target_ms / own_ms - 1.0)
             feed = need / kr
@@ -938,11 +976,18 @@ class Engine(asyncio.DatagramProtocol):
                 trim += cfg.vsc_limiter_gain * min(dt, 5.0) * (need - measured) / kr
                 trim = min(max(trim, -feed), room - feed)
                 phase.trims[o.car_id] = trim
+                # Pinned at the ceiling: what it measures now is the most this
+                # car can be slowed, which caps the target for the whole group.
+                if feed + trim >= room - 0.5 and o.vsc_extra_restrictor >= room - 0.5:
+                    old = phase.reach.get(o.car_id)
+                    phase.reach[o.car_id] = (
+                        measured if old is None else 0.7 * old + 0.3 * measured
+                    )
 
             extra = ramp * min(room, max(0.0, feed + trim))
             o.vsc_extra_restrictor = extra
             o.vsc_target_ms = target_ms
-            phase.peak_slow = max(phase.peak_slow, hold * ramp)
+            phase.peak_slow = max(phase.peak_slow, (target_ms / free_ms - 1.0) * ramp)
             # Ballast is never touched: the hold is the restrictor alone.
             self._push(
                 o, o.base_restrictor + extra, o.base_ballast,

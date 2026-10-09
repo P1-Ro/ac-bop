@@ -110,8 +110,9 @@ comes from that driver's own lap time and the model's learned per-track sensitiv
 After that, a live correction compares their measured pace with the target every tick
 and nudges the restrictor until they match. The correction matters because a restrictor
 bites less than linearly at high values, so the model's estimate alone under-delivers.
-In the test it adds 2–14% on top of that estimate, and every held car settles within
-0.2% of the target pace.
+Once the quickest car is at the ceiling, what it actually measures replaces the
+estimate, and that becomes the pace the whole group is held to. In the test every held
+car settles within 0.1% of the target pace.
 
 Pace is measured against **each driver's own lap profile**, recorded from their last
 clean lap: how much of their lap time goes into each part of the circuit. Without it, a
@@ -121,9 +122,10 @@ profile turns gaps into real seconds rather than track distance, which is why th
 closure rate and ETA hold steady through a lap.
 
 The closure rate is **physics, not a guess**. If a held car runs at (1 + s) times the
-caller's lap time, the caller gains `s/(1+s)` seconds per second of running. At the
-default `vsc_max_slowdown` of 0.6 that is 0.37 s/s, so a 20-second gap takes about
-50 seconds to close.
+caller's lap time, the caller gains `s/(1+s)` seconds per second of running. With the
+restrictor capped at 100% on a vanilla server, `s` is usually around 0.2, which gives
+about 0.17 s/s, so a 20-second gap takes roughly 100 seconds. `vsc_max_slowdown` is an
+upper bound on `s`; the quickest held car at full restrictor normally sets it.
 
 An earlier version did this with ballast, adding up to 2.5 tonnes. It worked, but the
 held cars wallowed, understeered and braked like lorries. A restrictor only takes away
@@ -303,13 +305,12 @@ ballast is ever added, that every held car settles on the target pace, and that 
 caller genuinely closes:
 
 ```
-    t     gap   extra restrictor (measured slowdown)
-    0.3   28.0s   +214%(+0%) +213%(+0%) +212%(+0%)
-   16.4   21.9s   +329%(+58%) +325%(+58%) +323%(+58%)
-   32.5   15.8s   +336%(+59%) +328%(+59%) +326%(+59%)
-   48.6    9.6s   +336%(+59%) +328%(+59%) +326%(+59%)
-   64.7    3.4s   +336%(+59%) +328%(+59%) +323%(+59%)
- gap 28.0s -> 2.9s in 66s of running   (predicted ETA was 67s)
+    t     gap   total restrictor (measured slowdown)
+    0.3   17.0s     77%(+0%)   74%(+0%)   70%(+0%)
+   24.9   13.3s     82%(+16%)   80%(+15%)   78%(+15%)
+   49.4    9.8s     86%(+15%)   80%(+15%)   75%(+15%)
+   73.9    6.3s     82%(+15%)   77%(+15%)   78%(+15%)
+ gap 17.0s -> 3.0s in 98s of running   (predicted ETA was 101s)
 ```
 
 ---
@@ -345,12 +346,11 @@ held drivers see a few notifications as the limiter settles. `vsc_deadband_restr
 bothers your
 group.
 
-**A held car runs a very large restrictor**, often 300% or more. That is what it takes to
-hold a car to 60% slower, and AC accepts values up to 400% (`vsc_max_restrictor`). If
-your server caps the admin command lower, set the ceiling to match. The live correction
-then stops at the cap, and the caller closes more slowly than the ETA says.
-`vsc_max_slowdown` is the dial if your group finds the hold too slow: lower is gentler
-but closes the gap more slowly, and the maths is in the tooltip.
+**The hold is limited by the restrictor ceiling.** A vanilla acServer caps the
+restrictor at 100%, which is worth roughly 20% of lap time. The quickest held car at
+100% sets the pace for the whole group, and slower drivers get just enough restrictor to
+match it. That closes about 0.17 s of gap per second, so a 20-second gap takes around
+100 seconds. A true speed limiter needs a client-side plugin, which is planned separately.
 
 **Pit detection is approximate.** ACSP gives no pit event, so a sustained stop is
 treated as "the next lap is an out-lap". A driver who parks on track and rejoins loses
