@@ -107,6 +107,7 @@ async def drive(engine, srv, sims, seconds: float, on_step=None) -> float:
         * math.exp(sims[d.car_id].skill) * (1.0 + true_loss(sims[d.car_id]))
         for d in engine.drivers.values()
     }
+    quiet_until: dict[int, float] = {}
     while clock() - start < seconds:
         await srv.pump(0.06)
         now = clock()
@@ -118,11 +119,14 @@ async def drive(engine, srv, sims, seconds: float, on_step=None) -> float:
             s.spline += dt / (lap_s * corner_shape(s.spline))
             if s.spline >= 1.0:
                 s.spline -= 1.0
-                srv.send(p_car_update(d.car_id, s.spline, 170.0))
                 s.laps += 1
+                # A real server fires LAP_COMPLETED the instant the car crosses
+                # the line, but the next position update can be up to a full
+                # realtime interval later, still showing the car short of it.
                 srv.send(p_lap_completed(d.car_id, int((now - lap_start[d.car_id]) * 1000), 0, []))
                 lap_start[d.car_id] = now
-            else:
+                quiet_until[d.car_id] = now + 1.5
+            elif now >= quiet_until.get(d.car_id, 0.0):
                 srv.send(p_car_update(d.car_id, s.spline, 170.0))
         if on_step is not None and on_step(now - start) is False:
             break
@@ -227,8 +231,10 @@ async def main() -> int:
     check(gaps[-1] <= cfg.vsc_target_gap_s + 0.5,
           f"the caller actually caught the pack ({gaps[0]:.1f}s -> {gaps[-1]:.1f}s, "
           f"target {cfg.vsc_target_gap_s:.0f}s)")
-    check(all(gaps[i + 1] <= gaps[i] + 0.4 for i in range(len(gaps) - 1)),
-          "gap closed monotonically (no oscillation)")
+    jumps = [round(gaps[i + 1] - gaps[i], 2) for i in range(len(gaps) - 1)
+             if gaps[i + 1] > gaps[i] + 0.4]
+    check(not jumps, "gap closed monotonically (no oscillation)"
+          + (f" (jumps: {jumps[:5]})" if jumps else ""))
     check(eta is not None and abs(eta - ran) < 0.35 * ran,
           f"the predicted ETA held up ({eta:.0f}s predicted, {ran:.0f}s actual)")
 
@@ -267,6 +273,9 @@ async def main() -> int:
     )
     check(restored, "every driver's normal handicap restored afterwards")
     check(any("ENDING" in m for m in srv.chat_to_drivers), "end was announced")
+    check(any("has closed" in m for m in srv.chat_to_drivers),
+          "it ended because the gap closed, not on a false 'now leading' "
+          "as the caller crossed the line")
 
     # Laps during the phase must never reach the model.
     bad = store.q1(
@@ -320,6 +329,37 @@ async def main() -> int:
     behind_extra = sims2[2].restrictor - base2[2]
     check(engine2.vsc is not None and behind_extra > 0,
           f"with vsc_slow_whole_field the car behind is slowed too (+{behind_extra:.0f}%)")
+
+    # The caller crossing the line must never look like them taking the lead,
+    # whichever of LAP_COMPLETED and the wrapped position arrives first.
+    engine2.drivers[0].laps_done = 6   # P1 is laps up the road
+    lead = engine2.drivers[0].progress
+    caller2 = engine2.drivers[1]
+    for sp in (0.97, 0.995):
+        srv2.send(p_car_update(1, sp, 170.0))
+        await srv2.pump(0.1)
+    srv2.send(p_lap_completed(1, 95_000, 0, []))       # lap first...
+    await srv2.pump(0.8)                               # ...several ticks of stale position
+    check(engine2.vsc is not None and 2.99 <= caller2.progress <= 3.06 < lead,
+          f"lap event before the wrapped position: still behind, phase running "
+          f"(progress {caller2.progress:.3f})")
+    srv2.send(p_car_update(1, 0.01, 170.0))
+    await srv2.pump(0.2)
+    check(abs(caller2.progress - 3.01) < 0.01 and engine2.vsc is not None,
+          f"...and the crossing is counted once ({caller2.progress:.3f})")
+
+    for sp in (0.5, 0.75, 0.98):
+        srv2.send(p_car_update(1, sp, 170.0))
+        await srv2.pump(0.1)
+    srv2.send(p_car_update(1, 0.02, 170.0))           # wrapped position first...
+    await srv2.pump(0.8)
+    check(engine2.vsc is not None and abs(caller2.progress - 4.02) < 0.01,
+          f"wrapped position before the lap event: counted straight away "
+          f"({caller2.progress:.3f})")
+    srv2.send(p_lap_completed(1, 95_000, 0, []))       # ...then the lap
+    await srv2.pump(0.2)
+    check(abs(caller2.progress - 4.02) < 0.01 and engine2.vsc is not None,
+          f"...and not counted twice ({caller2.progress:.3f})")
 
     bg2.cancel()
     transport2.close()
