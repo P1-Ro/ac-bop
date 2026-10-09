@@ -116,9 +116,9 @@ async def api_handicap_set(request: web.Request) -> web.Response:
         guid, track, car = b["guid"], b["track"], b["car_model"]
     except (KeyError, TypeError, ValueError):
         return web.json_response({"error": "restrictor and ballast must be numbers"}, status=400)
-    if not (0 <= restrictor <= 400) or not (0 <= ballast <= 5000):
+    if not (0 <= restrictor <= 100) or not (0 <= ballast <= 5000):
         return web.json_response(
-            {"error": "restrictor must be 0-400% and ballast 0-5000 kg"}, status=400
+            {"error": "restrictor must be 0-100% and ballast 0-5000 kg"}, status=400
         )
     store.set_handicap(guid, track, car, restrictor, ballast, manual=bool(b.get("manual", True)))
     store.log(
