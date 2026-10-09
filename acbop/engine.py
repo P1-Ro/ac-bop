@@ -19,6 +19,10 @@ from .model import recompute_all
 
 log = logging.getLogger("acbop.engine")
 
+# How long "caller is leading" or "gap closed" must hold before a safety car
+# phase ends on it.
+VSC_END_CONFIRM_S = 2.0
+
 
 @dataclass
 class Driver:
@@ -57,6 +61,11 @@ class Driver:
     lap_points: list = field(default_factory=list)  # (spline, time) this lap
     lap_cross_t: float | None = None
     pace_profile: list | None = None
+    # LAP_COMPLETED and the position update that shows the car past the line
+    # arrive separately, in either order. Whichever comes first is noted here
+    # until the other catches up, so the crossing is counted exactly once.
+    lap_early_at: float | None = None   # lap counted, car still short of the line
+    wrap_early_at: float | None = None  # car past the line, lap not counted yet
 
     vsc_uses: int = 0
     # Extra restrictor the safety car limiter is imposing on top of the
@@ -71,7 +80,16 @@ class Driver:
 
     @property
     def progress(self) -> float:
-        return self.laps_done + self.spline
+        if self.lap_early_at is not None:
+            # Past the line, but the last position we have is from before it.
+            # Carry it on from the moment it crossed rather than freezing it.
+            lap_ms = self.vsc_target_ms or self.best_laptime_ms or self.last_laptime_ms
+            ran = (time.time() - self.lap_early_at) * 1000.0 / lap_ms if lap_ms else 0.0
+            return self.laps_done + min(0.05, max(0.0, ran))
+        p = self.laps_done + self.spline
+        if self.wrap_early_at is not None:
+            p += 1.0
+        return p
 
     @property
     def track_pos(self) -> float:
@@ -138,6 +156,10 @@ class VscPhase:
     # Measured slowdown a car actually reaches with the restrictor at its
     # ceiling, keyed by car_id. Replaces the model's estimate once known.
     reach: dict = field(default_factory=dict)
+    # An ending condition must hold this long before the phase ends, so one
+    # bad position reading cannot cancel it.
+    ending: str | None = None
+    ending_since: float = 0.0
 
     def ramp(self, now: float, ramp_s: float) -> float:
         """Ease in at the start and out as the deadline approaches."""
@@ -299,6 +321,8 @@ class Engine(asyncio.DatagramProtocol):
             d.vsc_until = None
             d.vsc_uses = 0
             d.laps_done = 0
+            d.lap_early_at = None
+            d.wrap_early_at = None
             d.out_lap_pending = True
             # A lap profile describes one circuit; it is meaningless elsewhere.
             d.trace.clear()
@@ -395,9 +419,19 @@ class Engine(asyncio.DatagramProtocol):
     def _trace(self, d: Driver, spline: float, now: float) -> None:
         """Record live position for the limiter and the lap profile."""
         prev = d.spline
+        # A crossing whose other half never arrived (no results/ directory, or
+        # a lap event while sitting in the pits) must not skew the order forever.
+        if d.lap_early_at is not None and now - d.lap_early_at > 5.0:
+            d.lap_early_at = None
+        if d.wrap_early_at is not None and now - d.wrap_early_at > 5.0:
+            d.wrap_early_at = None
         if d.trace:
             if spline < prev - 0.5:
                 d.wraps += 1
+                if d.lap_early_at is not None:
+                    d.lap_early_at = None
+                else:
+                    d.wrap_early_at = now
                 self._close_profile_lap(d, prev, spline, now)
             elif spline < prev - 0.02 or spline > prev + 0.25:
                 # Teleported (back to the pits, a reset): the running record
@@ -473,6 +507,10 @@ class Engine(asyncio.DatagramProtocol):
 
         d.laps_done += 1
         d.last_laptime_ms = lap.laptime_ms
+        if d.wrap_early_at is not None:
+            d.wrap_early_at = None          # the crossing was already seen
+        elif d.spline > 0.5:
+            d.lap_early_at = time.time()    # it will be, on the next update
 
         reason = self._reject_reason(d, lap)
         clean = reason is None
@@ -917,16 +955,28 @@ class Engine(asyncio.DatagramProtocol):
         gap = self.gap_ahead_seconds(caller)
         phase.last_gap_s = gap if gap is not None else 0.0
 
+        ending = None
         if gap is None:
-            self._end_vsc(f"{caller.name} is now leading")
-            return
-        if gap <= phase.target_gap_s:
-            phase.closed_early = True
-            self._end_vsc(f"{caller.name} has closed to {gap:.1f}s")
+            ending = "leading"
+        elif gap <= phase.target_gap_s:
+            ending = "closed"
+        if ending != phase.ending:
+            phase.ending, phase.ending_since = ending, now
+        if ending is not None and now - phase.ending_since >= VSC_END_CONFIRM_S:
+            if ending == "leading":
+                self._end_vsc(f"{caller.name} is now leading")
+            else:
+                phase.closed_early = True
+                self._end_vsc(f"{caller.name} has closed to {gap:.1f}s")
             return
         if now >= phase.deadline:
-            self._end_vsc(f"time limit reached, gap {gap:.1f}s")
+            self._end_vsc(
+                "time limit reached" + (f", gap {gap:.1f}s" if gap is not None else "")
+            )
             return
+
+        if gap is None:
+            return  # waiting to confirm; keep the hold exactly as it is
 
         ramp = phase.ramp(now, cfg.vsc_ramp_s)
         dt = now - phase.last_tick if phase.last_tick else 0.0
