@@ -1,13 +1,15 @@
 """
-The CMRT HUD's acbop integration, under LuaJIT (what CSP uses).
+The acbop HUD under LuaJIT (what CSP uses).
 
-Every Lua file in hud/ and acbop/csp/ must at least parse. Then the HUD's
-acbop module runs against stand-ins for the CSP calls it makes: finding acbop
-from the server's CSP options, polling /csp/state, the leaderboard text and
-safety car roles, the rebindable call button, and dropping stale data.
+Every Lua file in hud/ and acbop/csp/ must at least parse. The HUD's acbop
+module runs against stand-ins for the CSP calls it makes: finding acbop from
+the server's CSP options, polling /csp/state, the leaderboard text and safety
+car roles, the rebindable call button, and dropping stale data. Then the whole
+app runs headless through a faked three-car race (tests/hud_env.lua), drawing
+the leaderboard and settings windows, and must not raise a single error.
 
-The leaderboard drawing itself needs the game; this covers the logic behind it.
-Needs the `lupa` package (pip install lupa); skipped without it.
+How it looks still needs the game. Needs the `lupa` package (pip install
+lupa); skipped without it.
 """
 
 from __future__ import annotations
@@ -17,7 +19,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULE = ROOT / "hud" / "assettocorsa" / "apps" / "lua" / "CMRT-Essential-HUD" / "common" / "acbop.lua"
+APP = ROOT / "hud" / "assettocorsa" / "apps" / "lua" / "acbop-HUD"
+MODULE = APP / "common" / "acbop.lua"
+ENV = Path(__file__).resolve().parent / "hud_env.lua"
 
 try:
     from lupa import luajit21 as lupa
@@ -87,7 +91,7 @@ def module() -> None:
 
     m.init()
     m.update()
-    check(g.buttonId == "CMRT-Essential-HUD/Call virtual safety car",
+    check(g.buttonId == "acbop-HUD/Call virtual safety car",
           "registers a rebindable control for calling a safety car")
     check(g.requested == "http://bop.example:8770/csp/state",
           "finds acbop from the server's [SCRIPT_...] line and polls its state")
@@ -130,9 +134,58 @@ def module() -> None:
           "after repeated failures the data is dropped, not left stale on screen")
 
 
+def whole_app() -> None:
+    lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(f"package.path = '{APP.as_posix()}/?.lua;' .. package.path")
+    lua.execute(ENV.read_text(encoding="utf-8"))
+    g = lua.globals()
+
+    def to_lua(v):
+        if isinstance(v, dict):
+            return lua.table_from({k: to_lua(x) for k, x in v.items()})
+        if isinstance(v, list):
+            return lua.table_from([to_lua(x) for x in v])
+        return v
+
+    g.JSON = lua.table_from({"parse": lambda s: to_lua(json.loads(s))})
+    lua.execute((APP / "acbop-HUD.lua").read_text(encoding="utf-8"))
+    update = g.script.update
+    for _ in range(5):
+        update(0.016)
+    g.Acbop_Url = "http://bop.test:8770"
+    state = {"cmd": "!vsc", "vsc": {"caller": 2, "held": [0, 1], "limit_kmh": 100},
+             "cars": [{"id": 0, "name": "Me", "r": 12, "b": 40},
+                      {"id": 1, "name": "Alice", "r": 6, "b": 25},
+                      {"id": 2, "name": "Bob", "r": 0, "b": 0}]}
+    for frame in range(400):
+        for c in range(3):
+            car = g.cars[c]
+            car.splinePosition = (car.splinePosition + 0.002) % 1.0
+            car.lapTimeMs += 16
+        update(0.016)
+        if g.pending is not None:
+            callback, g.pending = g.pending, None
+            callback(None, lua.table_from({"status": 200, "body": json.dumps(state)}))
+        if frame % 50 == 0:
+            g.leaderboardShow(0)
+            g.leaderboardMain(0.016)
+            g.settingsMain(0.016)
+
+    lua.execute("drawn = {}; ui.dwriteDrawText = function(t) drawn[#drawn + 1] = tostring(t) end")
+    g.leaderboardMain(0.016)
+    drawn = list(g.drawn.values())
+    errors = list(g.errors.values())
+    for e in errors[:3]:
+        print("  " + e.splitlines()[0])
+    check(not errors, f"the whole app runs a faked race without errors ({len(errors)} raised)")
+    check("25kg 6%" in drawn and "VIRTUAL SAFETY CAR" in drawn,
+          "the leaderboard draws ballast/restrictor and the safety car flag")
+
+
 def main() -> int:
     syntax()
     module()
+    whole_app()
     failed = [m for ok, m in results if not ok]
     print("-" * 72)
     print(f"{len(results) - len(failed)}/{len(results)} checks passed")
