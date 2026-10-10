@@ -191,7 +191,8 @@ car are excluded anyway.
 
 ### The CMRT HUD
 
-A modified CMRT Essential HUD (v1.0.13 + acbop) adds two things for drivers:
+A modified CMRT Essential HUD (v1.0.13 + acbop), kept in [`hud/`](hud/), adds two things
+for drivers:
 
 - The **leaderboard** shows each driver's ballast and restrictor, from acbop, next to
   their name. While a safety car runs, held cars are shown in yellow, the caller in
@@ -210,6 +211,17 @@ URL = 'http://your.server.address:8770'
 
 The HUD only displays and asks. The limiting is done by the online script, so a driver
 without the HUD is still held.
+
+Drivers install it like any CSP app: download the zip from the
+[latest release](https://github.com/P1-Ro/ac-bop/releases/latest) and drop it on Content
+Manager, or copy its `assettocorsa` folder over the game's. To build the zip yourself:
+
+```bash
+python3 tools/build_hud_zip.py     # -> dist/CMRT_essential_hud_v<version>.zip
+```
+
+Files in `hud/` keep the original Windows line endings (`.gitattributes` stops git
+converting them), so a diff against a fresh CMRT download shows only the acbop changes.
 
 ### Recompute vs Re-apply
 
@@ -349,6 +361,7 @@ python3 tests/test_track_variation.py   # per-track sensitivity and driver affin
 python3 tests/test_safetycar.py         # does the caller actually catch the pack
 python3 tests/test_vsc_limiter.py       # limiter mode, its safety net and /csp/ endpoints
 python3 tests/test_csp_script.py        # the in-game script under LuaJIT (needs: pip install lupa)
+python3 tests/test_hud.py               # the HUD's acbop module under LuaJIT (needs: pip install lupa)
 ```
 
 These spin up a fake AC server that speaks ACSP over a real UDP socket and drive the
