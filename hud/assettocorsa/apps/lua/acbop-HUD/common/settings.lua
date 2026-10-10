@@ -27,8 +27,6 @@ local colors = {
 local fonts = {
     archivo_bold    = ui.DWriteFont("Archivo SemiExpanded:/fonts;Weight=Bold"),
     archivo_medium  = ui.DWriteFont("Archivo SemiExpanded:/fonts;Weight=Medium"),
-    archivo_black   = ui.DWriteFont("Archivo SemiExpanded:/fonts;Weight=Black"),
-    opti_edgar = ui.DWriteFont("OPTIEdgarBold:/fonts"),
 }
 
 local settings = {
@@ -39,29 +37,11 @@ local settings = {
 
 local winstuff = table.new(9, 0)
 local appnames = {
-    APPNAMES.deltabar,
-    APPNAMES.gearbox,
     APPNAMES.leaderboard,
-    APPNAMES.map,
-    APPNAMES.local_time,
-    APPNAMES.real_time,
-    APPNAMES.pedals,
-    APPNAMES.radar,
-    APPNAMES.sectors,
-    APPNAMES.tyres,
 }
 
 local appsize_storage = ac.storage{
-    local_time_old_size  = vec2(),
-    real_time_old_size   = vec2(),
-    deltabar_old_size    = vec2(),
-    gearbox_old_size     = vec2(),
     leaderboard_old_size = vec2(),
-    map_old_size         = vec2(),
-    pedals_old_size      = vec2(),
-    radar_old_size       = vec2(),
-    sectors_old_size     = vec2(),
-    tyres_old_size       = vec2(),
 }
 
 local sim = ac.getSim()
@@ -113,70 +93,6 @@ end
 ---@param c1 rgbm
 ---@param c2 rgbm
 ---@param t number
-function settings.color_lerp(c1, c2, t)
-    return rgbm(
-        math.lerp(c1.r, c2.r, t),
-        math.lerp(c1.g, c2.g, t),
-        math.lerp(c1.b, c2.b, t),
-        math.lerp(c1.mult, c2.mult, t)
-    )
-end
-
-function settings.color_rgb_to_hsv(r, g, b)
-    -- formula from https://math.stackexchange.com/questions/556341/rgb-to-hsv-color-conversion-algorithm
-    local cmax = math.max(r, g, b)
-    local cmin = math.min(r, g, b)
-    local delta = cmax - cmin
-    local sat = 0
-    local value = cmax
-    if delta == 0 then return 0, 0, value end
-    if cmax ~= 0 then sat = delta / cmax end
-    local hue = 0
-    if cmax == r then hue = 60 * (((g - b) / delta) % 6) end
-    if cmax == g then hue = 60 * ((2 + (b - r) / delta) % 6) end
-    if cmax == b then hue = 60 * ((4 + (r - g) / delta) % 6) end
-    return hue, sat, value
-end
-
-function settings.color_hsv_to_rgb(h, s, v)
-    -- formula from https://scratch.mit.edu/discuss/topic/694772/
-    local c = v * s
-    local m = v - c
-    local x = c * (1 - math.abs(((h / 60) % 2) - 1))
-    local r = 0
-    local g = 0
-    local b = 0
-    if h < 60 then      r, g, b = c, x, 0
-    elseif h < 120 then r, g, b = x, c, 0
-    elseif h < 180 then r, g, b = 0, c, x
-    elseif h < 240 then r, g, b = 0, x, c
-    elseif h < 300 then r, g, b = x, 0, c
-    elseif h < 360 then r, g, b = c, 0, x
-    end
-    r = (r + m) * 255
-    g = (g + m) * 255
-    b = (b + m) * 255
-    return r, g, b
-end
-
----@param c1 rgbm
----@param c2 rgbm
----@param t number
-function settings.color_lerp_hsv(c1, c2, t)
-    local h1, s1, v1 = settings.color_rgb_to_hsv(c1.r, c1.g, c1.b)
-    local h2, s2, v2 = settings.color_rgb_to_hsv(c2.r, c2.g, c2.b)
-    local h_out = math.lerp(h1, h2, t)
-    local s_out = math.lerp(s1, s2, t)
-    local v_out = math.lerp(v1, v2, t)
-    h_out = (h_out + 360) % 360
-    local r, g, b = settings.color_hsv_to_rgb(h_out, s_out, v_out)
-    return rgbm(
-        r / 255, g / 255, b / 255,
-        math.lerp(c1.mult, c2.mult, t)
-    )
-end
-
-
 function settings.remap(value, old_min, old_max, new_min, new_max)
     return new_min + (value - old_min) * (new_max - new_min) / (old_max - old_min)
 end
@@ -186,7 +102,7 @@ function settings.remapc(value, old_min, old_max, new_min, new_max)
 end
 
 function settings.get_asset(name)
-    return string.format("apps/lua/CMRT-Essential-HUD/assets/%s.png", name)
+    return string.format("apps/lua/acbop-HUD/assets/%s.png", name)
 end
 
 function settings.ease_out_back(x)
@@ -223,21 +139,11 @@ function settings.auto_scale_window(size, name)
     win:resize(real_size)
 
     local old_size = vec2()
-    if name == APPNAMES.deltabar    then old_size = appsize_storage.deltabar_old_size    end
-    if name == APPNAMES.gearbox     then old_size = appsize_storage.gearbox_old_size     end
     if name == APPNAMES.leaderboard then old_size = appsize_storage.leaderboard_old_size end
-    if name == APPNAMES.map         then old_size = appsize_storage.map_old_size         end
-    if name == APPNAMES.local_time  then old_size = appsize_storage.local_time_old_size  end
-    if name == APPNAMES.real_time   then old_size = appsize_storage.real_time_old_size   end
-    if name == APPNAMES.pedals      then old_size = appsize_storage.pedals_old_size      end
-    if name == APPNAMES.radar       then old_size = appsize_storage.radar_old_size       end
-    if name == APPNAMES.sectors     then old_size = appsize_storage.sectors_old_size     end
-    if name == APPNAMES.tyres       then old_size = appsize_storage.tyres_old_size       end
 
     local diff_to_move = (real_size - old_size) * ui_info.uiScale
     diff_to_move.x = math.round(diff_to_move.x)
-    diff_to_move.y = math.round(diff_to_move.y)
-    if name == APPNAMES.deltabar then diff_to_move.x = 0 end -- the deltabar scales in its own way, we don't want to interact with that on the x axis only
+    diff_to_move.y = math.round(diff_to_move.y) -- the deltabar scales in its own way, we don't want to interact with that on the x axis only
     if old_size.x ~= 0 and old_size.y ~= 0 and (diff_to_move.x ~= 0 or diff_to_move.y ~= 0) then
         local app_center = (ui.windowPos() + ui.windowSize() / 2) * ui_info.uiScale
         local sim_info = ac.getSim()
@@ -261,16 +167,7 @@ function settings.auto_scale_window(size, name)
         win:move(new_pos)
     end
     
-    if name == APPNAMES.deltabar    then appsize_storage.deltabar_old_size    = real_size end
-    if name == APPNAMES.gearbox     then appsize_storage.gearbox_old_size     = real_size end
     if name == APPNAMES.leaderboard then appsize_storage.leaderboard_old_size = real_size end
-    if name == APPNAMES.map         then appsize_storage.map_old_size         = real_size end
-    if name == APPNAMES.local_time  then appsize_storage.local_time_old_size  = real_size end
-    if name == APPNAMES.real_time   then appsize_storage.real_time_old_size   = real_size end
-    if name == APPNAMES.pedals      then appsize_storage.pedals_old_size      = real_size end
-    if name == APPNAMES.radar       then appsize_storage.radar_old_size       = real_size end
-    if name == APPNAMES.sectors     then appsize_storage.sectors_old_size     = real_size end
-    if name == APPNAMES.tyres       then appsize_storage.tyres_old_size       = real_size end
 end
 
 function settings.auto_place_once(size, name)
@@ -289,16 +186,7 @@ function settings.auto_place_once(size, name)
     local rear_mirror_width = 442
     local rear_mirror_height = 61
     local app_positions = {
-        [APPNAMES.gearbox]     = vec2(screensize.x - real_size.x - padding, screensize.y - real_size.y - padding),
         [APPNAMES.leaderboard] = vec2(padding, top_bar_size),
-        [APPNAMES.sectors]     = vec2(screensize.x - real_size.x - padding, top_bar_size),
-        [APPNAMES.pedals]      = vec2(screensize.x / 2 - real_size.x / 2 + 1, screensize.y - real_size.y - padding),
-        [APPNAMES.map]         = vec2(padding, screensize.y * 0.64 - real_size.y - padding),
-        [APPNAMES.real_time]   = vec2(screensize.x / 2 - real_size.x/2 + rear_mirror_width / 2, top_bar_size),
-        [APPNAMES.local_time]  = vec2(screensize.x / 2 - real_size.x/2, top_bar_size - real_size.y),
-        [APPNAMES.tyres]       = vec2(padding, screensize.y - real_size.y - padding),
-        [APPNAMES.radar]       = screensize / 2 - real_size / 2 - vec2(0, padding * 4),
-        [APPNAMES.deltabar]    = vec2(screensize.x / 2 - real_size.x / 2, top_bar_size + rear_mirror_height),
     }
 
     local target_pos = app_positions[name]

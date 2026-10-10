@@ -6,7 +6,7 @@ car for anyone who gets dropped: the cars ahead are speed-limited until they cat
 
 Drivers install nothing by hand. The safety car's speed limiter is a small CSP script the
 server pushes to every player's game; the only requirement is CSP, which most players
-already run. An optional [CMRT HUD](#the-cmrt-hud) shows everyone's ballast and
+already run. An optional [acbop HUD](#the-acbop-hud) shows everyone's ballast and
 restrictor on the leaderboard and puts the safety car on a button.
 
 - Handicaps are keyed on **Steam GUID**, so join order and car slot are irrelevant.
@@ -107,7 +107,7 @@ are two ways to hold the cars ahead, chosen with `vsc_mode`:
 Everyone carries a **floor** (default 6% / 25 kg), which leaves headroom to go *down*:
 the caller drops it.
 
-Typing `!vsc` (or pressing the bound button in the CMRT HUD) starts a live phase:
+Typing `!vsc` (or pressing the bound button in the acbop HUD) starts a live phase:
 
 - the **caller** runs with no handicap at all
 - every car **ahead** is held: capped at `vsc_speed_limit_kmh` in limiter mode, or in
@@ -209,10 +209,14 @@ caller to catch up. If acbop stops answering for a few seconds, the script lets 
 Using the CSP physics functions marks the lap invalid, which is fine: laps under a safety
 car are excluded anyway.
 
-### The CMRT HUD
+### The acbop HUD
 
-A modified CMRT Essential HUD (v1.0.13 + acbop), kept in [`hud/`](hud/), adds two things
-for drivers:
+A small CSP app in [`hud/`](hud/): the leaderboard from CMRT Essential HUD by CMRT Group,
+cut down to just that, and installed as its own `acbop-HUD` app so it sits alongside a
+full CMRT install rather than replacing it. Everything else from CMRT (its other apps,
+the deltabar, logos, intro animations, fonts and images the leaderboard does not use) is
+gone; the deltabar's lap recording, which the leaderboard needs for intervals, is
+replaced by a small recorder of our own. It adds two things for drivers:
 
 - The **leaderboard** shows each driver's ballast and restrictor, from acbop, next to
   their name. While a safety car runs, held cars are shown in yellow, the caller in
@@ -237,11 +241,12 @@ Drivers install it like any CSP app: download the zip from the
 Manager, or copy its `assettocorsa` folder over the game's. To build the zip yourself:
 
 ```bash
-python3 tools/build_hud_zip.py     # -> dist/CMRT_essential_hud_v<version>.zip
+python3 tools/build_hud_zip.py     # -> dist/acbop_hud_v<version>.zip
 ```
 
-Files in `hud/` keep the original Windows line endings (`.gitattributes` stops git
-converting them), so a diff against a fresh CMRT download shows only the acbop changes.
+In-game it has two windows, **acbop leaderboard** and **acbop settings** (tabs:
+Leaderboard, Safety car). Files in `hud/` keep CMRT's Windows line endings
+(`.gitattributes` stops git converting them).
 
 ### Recompute vs Re-apply
 
@@ -344,7 +349,7 @@ RESTRICTED on the Live tab.
 ## Running it for the first time
 
 1. Add the [in-game limiter](#in-game-limiter-csp) line to `csp_extra_options.ini`, and
-   point drivers at the [HUD](#the-cmrt-hud) if they want it.
+   point drivers at the [HUD](#the-acbop-hud) if they want it.
 2. Start acbop, run a normal practice session, let everyone put in 10+ laps.
 3. Hit **Recompute now**. Drivers with enough clean laps flip from provisional to rated.
 4. Race. Handicaps are applied as each driver loads in.
@@ -401,15 +406,15 @@ python3 tests/test_track_variation.py   # per-track sensitivity and driver affin
 python3 tests/test_safetycar.py         # restrictor mode: does the caller actually catch the pack
 python3 tests/test_vsc_limiter.py       # limiter mode, its safety net and /csp/ endpoints
 python3 tests/test_csp_script.py        # the in-game script under LuaJIT (needs: pip install lupa)
-python3 tests/test_hud.py               # the HUD's acbop module under LuaJIT (needs: pip install lupa)
+python3 tests/test_hud.py               # the HUD under LuaJIT, whole app in a faked race (needs: pip install lupa)
 ```
 
 The Python tests spin up a fake AC server that speaks ACSP over a real UDP socket and
-drive the whole stack. The two Lua tests run the in-game script and the HUD's acbop
-module under LuaJIT, CSP's Lua engine, with the game's functions replaced by stand-ins;
-without `lupa` installed they print SKIP. The packet encoders in `tests/simserver.py` are written independently of
-the decoders in `acbop/protocol.py`, so a disagreement between them shows up as a test
-failure rather than a silent bug on race night.
+drive the whole stack. The packet encoders in `tests/simserver.py` are written
+independently of the decoders in `acbop/protocol.py`, so a disagreement between them
+shows up as a test failure rather than a silent bug on race night. The two Lua tests run
+the in-game script and the HUD under LuaJIT, CSP's Lua engine, with the game's functions
+replaced by stand-ins; without `lupa` installed they print SKIP.
 
 Representative result — six drivers spread across 7.8% of lap time:
 

@@ -1,5 +1,4 @@
 local settings = require("common.settings")
-local fullscreen = require("fullscreen.first")
 
 --[[
     Dedicated into keeping track of various info for every player in session.
@@ -531,35 +530,6 @@ function mod.get_previous_laptime(car_index)
         end
     end
     return last_laptime
-end
-
-function mod.play_intro_anim_setup(center, size, anim_start, is_showing, disable)
-    if DEV_IntroAnimOff then return end
-    if disable ~= nil and disable == true and fullscreen.intro_anim_played() then return end -- pctime and maptime don't want this animation to always play, so they control it here
-    local clip_anim_t = 1 - math.clamp(settings.remap(Time - anim_start, 0.6, 0.8, 0, 1), 0, 1)
-    if is_showing == false then clip_anim_t = 1 end -- so we avoid first frame of flicker
-    local real_size = size * 1.5 -- make it larger so we don't accidentally cut anything important
-    local clip_tl = center - real_size / 2 - vec2(clip_anim_t * real_size.x, 0)
-    ui.pushClipRect(clip_tl, clip_tl + real_size) -- open the clip for the whole app
-end
-
-
-local intro_logo_size = vec2(1024, 217) * 0.11 -- resolution of image scaled down
-function mod.play_intro_anim(center, size, anim_start, app_scale)
-    if DEV_IntroAnimOff then return end
-    ui.popClipRect() -- close the clip for the whole app
-    if not fullscreen.intro_anim_played() then return end -- we don't play our per app animation if the fullscreen one is playing now
-    if anim_start + 2 <= Time then return end -- so we don't loose time drawing stuff never visible
-    
-    local anim_t = math.clamp(settings.remap(Time - anim_start, 0.8, 1.0, 0, 1), 0, 1)
-    local logo_clip_pos = center - size / 2 + vec2(size.x * anim_t, 0)
-    ui.pushClipRect(logo_clip_pos, logo_clip_pos + size)
-    ui.drawImage(
-        settings.get_asset("cmrt_logo"),
-        center - intro_logo_size * app_scale,
-        center + intro_logo_size * app_scale
-    )
-    ui.popClipRect()
 end
 
 

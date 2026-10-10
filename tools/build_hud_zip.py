@@ -1,12 +1,10 @@
 """
-Package hud/ as the installable CMRT Essential HUD zip.
+Package hud/ as the installable acbop HUD zip.
 
-The layout matches the original download: a single CMRT_essential_hud/ folder
-holding assettocorsa/apps/lua/CMRT-Essential-HUD plus the optional flag and
-fuel replacement. Drop it on Content Manager, or copy the assettocorsa folder
-over the game's.
+A single acbop_hud/ folder holding assettocorsa/apps/lua/acbop-HUD. Drop it on
+Content Manager, or copy the assettocorsa folder over the game's.
 
-    python3 tools/build_hud_zip.py            # -> dist/CMRT_essential_hud_v<version>.zip
+    python3 tools/build_hud_zip.py            # -> dist/acbop_hud_v<version>.zip
     python3 tools/build_hud_zip.py -o x.zip
 """
 
@@ -20,8 +18,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HUD = ROOT / "hud"
-APP = HUD / "assettocorsa" / "apps" / "lua" / "CMRT-Essential-HUD"
-PREFIX = "CMRT_essential_hud"
+APP = HUD / "assettocorsa" / "apps" / "lua" / "acbop-HUD"
+PREFIX = "acbop_hud"
+# What a CSP app is made of. Anything else in hud/ is a stray (a download, an
+# editor backup) and stops the build rather than shipping to every driver.
+APP_FILES = {".lua", ".ini", ".png", ".ttf"}
 
 
 def hud_version() -> str:
@@ -33,6 +34,10 @@ def hud_version() -> str:
 
 
 def build(out: Path) -> Path:
+    strays = [p for p in HUD.rglob("*") if p.is_file() and p.suffix.lower() not in APP_FILES]
+    if strays:
+        sys.exit("not an app file, remove it from hud/: " + ", ".join(
+            str(p.relative_to(ROOT)) for p in strays))
     out.parent.mkdir(parents=True, exist_ok=True)
     # Fixed timestamps, so the same tree always gives the same zip.
     stamp = (2024, 1, 1, 0, 0, 0)
@@ -54,7 +59,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("-o", "--output", type=Path)
     args = ap.parse_args()
-    out = args.output or ROOT / "dist" / f"CMRT_essential_hud_v{hud_version()}.zip"
+    out = args.output or ROOT / "dist" / f"acbop_hud_v{hud_version()}.zip"
     build(out)
     print(out)
 

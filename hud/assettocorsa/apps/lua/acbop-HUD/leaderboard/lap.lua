@@ -1,3 +1,5 @@
+-- Lap traces (where a car was at what time) and lap-time formatting for
+-- the leaderboard. From CMRT Essential HUD's deltabar and sectors helpers.
 local mod = {}
 
 local players = require('common.players')
@@ -98,25 +100,34 @@ function mod.add_info(lap, offset, elapsed_seconds, speed)
     lap.next_index = lap.next_index + 1
 end
 
-function mod.time_delta_to_string(time_ms)
-    if time_ms == 0 then return '0.00' end
-    if time_ms > 99990 then time_ms = 99990 end
-    if time_ms < -99990 then time_ms = -99990 end
-    local time_s = time_ms / 1000
-    local out = string.format("%.2f", math.abs(time_s))
-    return out
-end
-
 function mod.time_to_string(time_ms)
-    if time_ms == nil then return "--.---" end
-    if time_ms == 0 then return "--.---" end
+    if time_ms == nil then return "<nil>" end
+    if time_ms == 0 then return "-:--.---" end
     local time_s = time_ms / 1000
     local minutes = math.floor(time_s / 60)
     time_s = time_s - minutes * 60
     local out = string.format("%d:%06.3f", minutes, time_s)
-    if minutes <= 0 then
-        out = string.format("%06.3f", time_s)
-    end
+    return out
+end
+
+function mod.time_delta_to_string(time_ms)
+    if time_ms == nil then return '+0.00' end
+    if time_ms == 0 then return '+0.00' end
+    if time_ms > 99990 then time_ms = 99990 end
+    if time_ms < -99990 then time_ms = -99990 end
+    local time_s = time_ms / 1000
+    local sign = '+'
+    if time_ms < 0 then sign = '-' end
+    local out = string.format("%s%.2f", sign, math.abs(time_s))
+    return out
+end
+
+function mod.time_positive_delta_to_string(time_ms)
+    if time_ms == nil then return "<nil>" end
+    if time_ms == 0 then return "-" end
+    local time_s = time_ms / 1000
+    if time_s > 99.999 then time_s = 99.999 end
+    local out = string.format("+%.3f", time_s)
     return out
 end
 

@@ -4,10 +4,10 @@ local settings = require('common.settings')
 local fonts = settings.fonts
 local colors = settings.colors
 
-local lap = require("sectors.lap")
+local lap = require("leaderboard.lap")
 local players = require('common.players')
-local deltabar = require('deltabar.first')
-local deltabar_lap = require('deltabar.lap')
+local deltabar = require('leaderboard.recorder')
+local deltabar_lap = require('leaderboard.lap')
 local acbop = require('common.acbop')
 
 ---@param position integer
@@ -857,7 +857,6 @@ function module.main()
     local table_width = board_width + info_width
     local total_size = vec2(table_width, line_height * 6 + banner_size.y + header_height)
     local total_center = corner_tl + total_size / 2
-    players.play_intro_anim_setup(total_center, total_size, on_show_animation_start, is_showing)
 
     -- backgrounds
     local pixel_aligned = vec2(math.floor(top_center.x), math.floor(top_center.y))
@@ -1325,7 +1324,6 @@ function module.main()
     end
     ui.popDWriteFont()
     
-    players.play_intro_anim(total_center, total_size, on_show_animation_start, LeaderboardScale)
     settings.lock_app(total_center, total_size, APPNAMES.leaderboard, LeaderboardScale)
     settings.auto_scale_window(total_size * 1.01, APPNAMES.leaderboard)
     settings.auto_place_once(total_size, APPNAMES.leaderboard)

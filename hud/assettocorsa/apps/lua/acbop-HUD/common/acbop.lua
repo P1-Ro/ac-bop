@@ -93,7 +93,7 @@ local function poll(base)
 end
 
 function module.init()
-    call_button = ac.ControlButton('CMRT-Essential-HUD/Call virtual safety car')
+    call_button = ac.ControlButton('acbop-HUD/Call virtual safety car')
 end
 
 function module.on_session_start()
