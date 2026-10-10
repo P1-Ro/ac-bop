@@ -1,0 +1,73 @@
+# Publishes a GitHub release whenever master carries a version that has none
+# yet: bump __version__ in acbop/__init__.py, add docs/releases/v<version>.md,
+# merge. The release is tagged v<version>, uses that file as its notes, and
+# carries the CMRT HUD zip built from hud/.
+name: release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - acbop/__init__.py
+      - docs/releases/**
+      - hud/**
+      - tools/build_hud_zip.py
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Work out the version
+        id: version
+        run: |
+          version=$(python3 -c "import re; print(re.search(r'__version__ = \"([^\"]+)\"', open('acbop/__init__.py').read()).group(1))")
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "notes=docs/releases/v$version.md" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "${{ steps.version.outputs.tag }} is already released"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif [ ! -f "${{ steps.version.outputs.notes }}" ]; then
+            echo "::error::${{ steps.version.outputs.notes }} is missing; add release notes for this version"
+            exit 1
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the HUD zip
+        if: steps.check.outputs.exists == 'false'
+        run: python3 tools/build_hud_zip.py
+
+      - name: Publish the release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="${{ steps.version.outputs.notes }}"
+          # A leading "# Title" line is the release title, not part of the body.
+          title=$(head -n 1 "$notes" | sed -n 's/^# //p')
+          if [ -n "$title" ]; then tail -n +2 "$notes" > release-body.md; else cp "$notes" release-body.md; fi
+          gh release create "${{ steps.version.outputs.tag }}" dist/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "${title:-acbop ${{ steps.version.outputs.tag }}}" \
+            --notes-file release-body.md

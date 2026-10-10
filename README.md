@@ -353,6 +353,14 @@ by a poll.
 
 ---
 
+## Releasing
+
+Bump `__version__` in `acbop/__init__.py`, add release notes as
+`docs/releases/v<version>.md` (a first line `# Title` becomes the release title), and
+push to master. The `release` workflow then tags `v<version>`, builds the HUD zip and
+publishes the release with it attached. It does nothing for a version that is already
+released.
+
 ## Tests
 
 ```bash
