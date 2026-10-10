@@ -3,7 +3,7 @@ local mod = {}
 
 local acbop = require('common.acbop')
 
-local VERSION = "1.1.1"
+local VERSION = "1.0.0"
 
 local storage = nil
 local save_settings = false
