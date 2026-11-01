@@ -276,6 +276,7 @@ async function refreshLive() {
   setText('#s-track', s.session ? s.session.track : '—');
   setText('#s-drivers', s.drivers.length);
   setText('#s-applies', s.session ? (s.session.applies ? 'yes' : 'off') : '—');
+  syncBopToggle(s.bop_enabled);
 
   // safety car banner
   const banner = $('#sc-banner');
@@ -408,6 +409,30 @@ $('#btn-apply').addEventListener('click', async (e) => {
     toast(`Re-apply failed: ${errText(err)}`, 'error');
   }
   e.target.disabled = false;
+});
+
+function syncBopToggle(on) {
+  const t = $('#bop-toggle');
+  if (t.disabled) return; // a change is in flight; don't fight it
+  t.checked = !!on;
+  setText('#bop-toggle-label', on ? 'BoP on' : 'BoP off');
+}
+
+$('#bop-toggle').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  e.target.disabled = true;
+  try {
+    const r = await api.post('/api/config', { bop_enabled: on });
+    cfgCache = r.config;
+    toast(on ? 'BoP on: handicaps sent to the grid'
+             : 'BoP off: handicaps cleared from the grid', on ? 'ok' : 'warn');
+  } catch (err) {
+    e.target.checked = !on;
+    toast(`Switching BoP failed: ${errText(err)}`, 'error');
+  }
+  e.target.disabled = false;
+  syncBopToggle(e.target.checked);
+  refreshLive();
 });
 
 // ---------------------------------------------------------------- drivers
@@ -767,6 +792,9 @@ const GROUPS = [
       'Every command pops a notification for the driver. Higher means fewer pop-ups and a slightly looser hold.'],
   ]],
   ['Application', [
+    ['bop_enabled', 'BoP enabled',
+      'Master switch. Off hands out no handicap in any session and clears the ones on track.',
+      'Laps are still recorded and the model still learns, so turning it back on picks up where it left off.'],
     ['apply_in_practice', 'Apply in practice', 'Hand out handicaps during practice sessions.',
       'Leaving this on means practice laps are recorded with a handicap, which the model accounts for.'],
     ['apply_in_qualify', 'Apply in qualifying', 'Hand out handicaps during qualifying.',

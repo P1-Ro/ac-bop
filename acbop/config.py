@@ -159,6 +159,9 @@ class Config:
     vsc_ramp_s: float = 3.0
 
     # --- behaviour --------------------------------------------------------
+    # Master switch. Off sends every car zero ballast and zero restrictor in
+    # every session; laps are still recorded and the model still learns.
+    bop_enabled: bool = True
     apply_in_practice: bool = True
     apply_in_qualify: bool = True
     apply_in_race: bool = True

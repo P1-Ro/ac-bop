@@ -193,6 +193,9 @@ async def api_apply(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "drivers": len(engine.drivers)})
 
 
+APPLY_KEYS = {"bop_enabled", "apply_in_practice", "apply_in_qualify", "apply_in_race"}
+
+
 async def api_config_get(request: web.Request) -> web.Response:
     cfg: Config = request.app["cfg"]
     return web.json_response(cfg.to_dict())
@@ -207,6 +210,9 @@ async def api_config_post(request: web.Request) -> web.Response:
     if changed:
         cfg.save(request.app["cfg_path"])
         store.log("info", f"settings changed: {', '.join(changed)}")
+        # Switching BoP on or off takes effect on the cars on track right away.
+        if APPLY_KEYS.intersection(changed):
+            request.app["engine"].apply_all()
     return web.json_response(
         {"ok": not rejected, "changed": changed, "rejected": rejected, "config": cfg.to_dict()}
     )
