@@ -107,7 +107,8 @@ def main() -> int:
     quiet = {"vsc": None, "cars": []}
 
     frame(speed=180)
-    check(g.requested == "http://acbop.test:8770/csp/state", "polls acbop's state URL")
+    check(g.requested == "http://acbop.test:8770/csp/state?car=2",
+          f"polls acbop's state URL, saying which car it runs in ({g.requested})")
     answer(quiet)
     check(frame(speed=180) == {}, "no safety car: the car is never touched")
 
@@ -174,6 +175,30 @@ def main() -> int:
         if g.pending is not None:
             answer({}, status=503)
     check(frame(speed=180) == {}, "after acbop stops answering, the car is let go")
+
+    # Served without a car id (the URL placeholder was not filled in): the
+    # script asks the game for its own server slot instead.
+    lua2 = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua2.execute(MOCKS)
+    lua2.execute("car.sessionID = 5")
+    g2 = lua2.globals()
+    g2.JSON = lua2.table_from({"parse": lambda s: lua2.table_from({
+        "vsc": lua2.table_from({"caller": 7, "held": lua2.table_from([5]), "limit_kmh": 100}),
+    }) if json.loads(s) else None})
+    lua2.execute(
+        open(SCRIPT).read()
+        .replace("__ACBOP_STATE_URL__", "http://acbop.test:8770/csp/state")
+        .replace("__ACBOP_CAR_ID__", "-1")
+    )
+    g2.script.update(0.05)
+    check(g2.requested == "http://acbop.test:8770/csp/state?car=5",
+          f"without a served car id it reports the game's own slot ({g2.requested})")
+    g2.pending(None, lua2.table_from({"status": 200, "body": "{\"x\": 1}"}))
+    g2.car.speedKmh = 180
+    lua2.execute("calls = {}")
+    g2.script.update(0.05)
+    forced = [g2.calls[i][1] for i in range(1, len(g2.calls) + 1)]
+    check("throttle" in forced, f"...and is held when that slot is listed ({forced})")
 
     failed = [m for ok, m in results if not ok]
     print("-" * 72)

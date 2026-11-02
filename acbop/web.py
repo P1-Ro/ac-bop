@@ -238,6 +238,14 @@ async def api_vsc_end(request: web.Request) -> web.Response:
 
 async def csp_state(request: web.Request) -> web.Response:
     engine: Engine = request.app["engine"]
+    # The limiter script says which car it runs in, which is how acbop knows
+    # the script is installed. The HUD polls without it.
+    try:
+        car = int(request.query.get("car", "-1"))
+    except ValueError:
+        car = -1
+    if car >= 0:
+        engine.csp_checkin(car)
     return web.json_response(engine.csp_state(), headers={"Cache-Control": "no-store"})
 
 

@@ -147,6 +147,15 @@ async def main() -> int:
 
     # ------------------------------------------------------------- the call
     base = {c: (engine.drivers[c].base_restrictor, engine.drivers[c].base_ballast) for c in sims}
+    # The in-game script polls /csp/state with its car id, which is how acbop
+    # knows it is running. Cars 0-2 have it (Rogue's simply fails to slow the
+    # car); the caller's game never checks in.
+    for cid in (0, 1, 2):
+        code, _ = await asyncio.to_thread(http_get, f"/csp/state?car={cid}")
+    flags = {d["car_id"]: d["limiter_script"] for d in engine.state()["drivers"]}
+    check(code == 200 and flags == {0: True, 1: True, 2: True, 3: False},
+          f"cars whose script polls are seen as running it, the others are not ({flags})")
+
     srv.admin_log.clear()
     srv.chat_to_drivers.clear()
     srv.send(p_chat(3, "!vsc"))
@@ -173,6 +182,8 @@ async def main() -> int:
     def step(t):
         if engine.vsc is None:
             return False
+        for c in (0, 1, 2):
+            engine.csp_checkin(c)  # the scripts keep polling
         g = engine.gap_ahead_seconds(engine.drivers[3])
         if g is not None:
             gaps.append(g)

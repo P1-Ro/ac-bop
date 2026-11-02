@@ -118,7 +118,8 @@ Typing `!vsc` (or pressing the bound button in the acbop HUD) starts a live phas
 - it ends once the caller has stayed within `vsc_target_gap_s` of the car ahead for two
   seconds, or at the hard time limit (`vsc_max_duration_s`, default 180 s)
 
-Refused if: they are leading, the car ahead is closer than `vsc_min_gap_s` (stops it
+Only the car running **last** may call it (`vsc_last_place_only`, on by default; the
+GUI's admin button follows the same rule). Also refused if: they are leading, the car ahead is closer than `vsc_min_gap_s` (stops it
 becoming push-to-pass in a close fight), it is lap 1 or the final lap, they have already
 used it this race, one is already running, or the session is not a race. Every lap run
 during a phase is excluded from the model, and the lap after it ends is treated as an
@@ -138,10 +139,16 @@ caller gains mostly on the straights; in the test, a 22-second gap closed in 37 
 The banner's ETA is measured from the gap actually closed so far, since a speed cap has
 no formula for it.
 
-The safety net: a held car still more than `vsc_limiter_tolerance_kmh` (15) over the cap
-after `vsc_limiter_grace_s` (10 s), for three seconds running, evidently has no script.
-It is held at 100% restrictor for the rest of the phase, told why in chat, and flagged on
-the Live tab.
+The safety net: the script checks in with acbop every couple of seconds, so acbop knows
+which games are running it. A held car whose game has not checked in is held at 100%
+restrictor straight away, and the events log says the script is not running for it.
+A car that checks in but still runs more than `vsc_limiter_tolerance_kmh` (15) over the
+cap after `vsc_limiter_grace_s` (10 s), for three seconds running, is caught the same
+way. Either way the driver is told why in chat and flagged on the Live tab. 100%
+restrictor is only worth about 20% of lap time, so this is a backstop, not a substitute:
+**without the `[SCRIPT_…]` entry below, the cars ahead are barely slowed at all.** The
+Live tab shows a "no SC script" pill on every car whose game is not running it, so you
+can see that before anyone calls a safety car.
 
 #### Restrictor mode
 
@@ -194,7 +201,7 @@ REQUIRED = 1
 ```
 
 `{SessionID}` is filled in by the game with the player's slot, which is how the script
-knows which car it is. `REQUIRED = 1` stops anyone joining without it. The web port has to
+knows which car it is; if it is not, the script asks the game for its slot itself. `REQUIRED = 1` stops anyone joining without it. The web port has to
 be open to players, but only `/csp/` is reachable without the GUI password: the script
 itself, and `/csp/state`, a read-only list of who is held plus every car's ballast and
 restrictor, nothing players cannot already see in-game.
@@ -497,7 +504,7 @@ it only exposes what players can see in-game. Put the GUI behind a strong
 **The HUD matches drivers by name.** CSP gives a client no reliable way to read a car's
 server slot, so two drivers with identical names would show the same handicap on the
 leaderboard. The in-game limiter is not affected: it knows its own slot from the
-`{SessionID}` in its URL.
+`{SessionID}` in its URL, or failing that from the game.
 
 **Pit detection is approximate.** ACSP gives no pit event, so a sustained stop is
 treated as "the next lap is an out-lap". A driver who parks on track and rejoins loses

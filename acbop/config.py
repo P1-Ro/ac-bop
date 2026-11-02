@@ -104,15 +104,20 @@ class Config:
     vsc_mode: str = "limiter"
     # Speed cap for held cars in limiter mode.
     vsc_speed_limit_kmh: float = 100.0
-    # Safety net for limiter mode: a held car still more than this over the
-    # cap after the grace period, for 3 seconds running, has evidently not
-    # got the client script, and is held with the restrictor instead.
+    # Safety net for limiter mode: a held car whose game has not checked in
+    # with the script recently is held with the restrictor straight away. One
+    # that checks in but is still more than this over the cap after the grace
+    # period, for 3 seconds running, is evidently not being limited either,
+    # and is held with the restrictor too.
     vsc_limiter_tolerance_kmh: float = 15.0
     vsc_limiter_grace_s: float = 10.0
     vsc_max_duration_s: float = 180.0  # hard ceiling even if the gap never closes
     vsc_target_gap_s: float = 3.0      # phase ends once this close to the car ahead
     vsc_min_gap_s: float = 8.0         # must be this far behind to call it
     vsc_min_lap: int = 2               # not on the opening lap
+    # Only the car running last on the road may call it. Applies to the admin
+    # button too.
+    vsc_last_place_only: bool = True
     vsc_forbid_final_lap: bool = True
     vsc_per_session: int = 1           # uses per driver per session
     vsc_race_only: bool = True

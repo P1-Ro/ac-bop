@@ -48,6 +48,10 @@ end
 
 local function myId()
   if MY_CAR_ID >= 0 then return MY_CAR_ID end
+  -- The game knows its own server slot; the name match is a last resort.
+  local own = ac.getCar(0)
+  local sid = own and tonumber(own.sessionID)
+  if sid and sid >= 0 then return sid end
   if state and type(state.cars) == 'table' then
     local me = ac.getDriverName(0)
     for _, c in ipairs(state.cars) do
@@ -59,7 +63,10 @@ end
 
 local function poll()
   polling = true
-  web.get(STATE_URL, function (err, response)
+  -- Saying which car we are tells acbop this script is running here.
+  local id = myId()
+  local url = id >= 0 and (STATE_URL .. '?car=' .. tostring(id)) or STATE_URL
+  web.get(url, function (err, response)
     polling = false
     if err or not response or response.status ~= 200 then
       failures = failures + 1

@@ -299,13 +299,21 @@ async def main() -> int:
     await srv.pump(0.4)
     check(any("leading" in m for m in srv.chat_to_drivers), "the leader is refused")
 
+    # Only the car running last may call it: a mid-field car is refused even
+    # with a big enough gap ahead and its budget unused.
+    srv.chat_to_drivers.clear()
+    srv.send(p_chat(2, "!vsc"))
+    await srv.pump(0.4)
+    check(engine.vsc is None and any("last-placed" in m for m in srv.chat_to_drivers),
+          "a car that is not last is refused")
+
     bg.cancel()
     transport.close()
     store.close()
 
     # ------------------------------------------- whole-field variant -----
     print("\n  whole-field mode (keeps order behind the caller intact):")
-    cfg2, store2, engine2, transport2, bg2 = await build({"vsc_slow_whole_field": True}, port_base=12461)
+    cfg2, store2, engine2, transport2, bg2 = await build({"vsc_slow_whole_field": True, "vsc_last_place_only": False}, port_base=12461)
     sims2 = [
         SimDriver(0, "P1", "76561198000001001", "ks_mazda_mx5_cup", -0.02),
         SimDriver(1, "P2", "76561198000001002", "ks_mazda_mx5_cup", 0.00),

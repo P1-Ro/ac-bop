@@ -261,6 +261,11 @@ function stateCell(d, vsc) {
       `(no ballast added) — ${running}`);
   }
   if (!d.loaded) return pill('loading', '', 'Connected but still loading the track');
+  if (d.limiter_script === false) {
+    return pill('no SC script', 'warn',
+      'Their game is not running the acbop safety car limiter, so a safety car would hold them ' +
+      'with the restrictor only. Check the [SCRIPT_...] entry in the server\'s cfg/csp_extra_options.ini.');
+  }
   if (d.vsc_uses) return pill('SC used', '', 'Has already called their safety car this race');
   return pill('racing', 'ok');
 }
@@ -736,6 +741,9 @@ const GROUPS = [
       'Stops someone calling one before the field has settled.'],
     ['vsc_per_session', 'Calls per driver per race',
       'How many times each driver may call one in a race.', ''],
+    ['vsc_last_place_only', 'Last place only',
+      'Only the car running last on the road may call one, from chat or from this GUI.',
+      'Off lets anyone who is far enough behind the car ahead call one.'],
     ['vsc_forbid_final_lap', 'Block on final lap',
       'Refuse a call on the last lap.',
       'Off would let someone rewrite the result at the flag.'],

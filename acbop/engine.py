@@ -229,6 +229,9 @@ class Engine(asyncio.DatagramProtocol):
 
         # The live VSC phase, or None. One at a time.
         self.vsc: VscPhase | None = None
+        # car_id -> (guid, last time that car's in-game limiter script polled
+        # /csp/state). How we know the script is actually running.
+        self.csp_seen: dict[int, tuple[str, float]] = {}
 
     # -- transport --------------------------------------------------------
 
@@ -779,6 +782,11 @@ class Engine(asyncio.DatagramProtocol):
         gap = self.gap_ahead_seconds(d)
         if gap is None:
             return "you are leading"
+        if cfg.vsc_last_place_only and any(
+            o is not d and o.loaded and o.progress < d.progress
+            for o in self.drivers.values()
+        ):
+            return "only the last-placed car can call it"
         if gap < cfg.vsc_min_gap_s:
             return f"gap is only {gap:.1f}s (need {cfg.vsc_min_gap_s:.0f}s)"
         if cfg.vsc_mode != "limiter":
@@ -1082,6 +1090,7 @@ class Engine(asyncio.DatagramProtocol):
 
         held = self._vsc_slowdowns(caller)
         cap = cfg.vsc_speed_limit_kmh + cfg.vsc_limiter_tolerance_kmh
+        missing: list[str] = []
         for o in self.drivers.values():
             if o is caller or not o.loaded:
                 continue
@@ -1094,7 +1103,16 @@ class Engine(asyncio.DatagramProtocol):
                 continue
             o.vsc_limited = True
 
-            if now - phase.started >= cfg.vsc_limiter_grace_s and o.speed_kmh > cap:
+            if o.car_id not in phase.fallback and not self.has_limiter_script(o):
+                # Its game is not running the script, so nothing will slow it.
+                phase.fallback.add(o.car_id)
+                self.whisper(
+                    o.car_id,
+                    "Safety car: the acbop limiter is not running in your game, "
+                    "so you are being held with the restrictor.",
+                )
+                missing.append(o.name)
+            elif now - phase.started >= cfg.vsc_limiter_grace_s and o.speed_kmh > cap:
                 since = phase.overspeed_since.setdefault(o.car_id, now)
                 if now - since >= 3.0 and o.car_id not in phase.fallback:
                     phase.fallback.add(o.car_id)
@@ -1116,6 +1134,34 @@ class Engine(asyncio.DatagramProtocol):
                 if o.vsc_extra_restrictor != extra:
                     o.vsc_extra_restrictor = extra
                     self._push(o, o.base_restrictor + extra, o.base_ballast, force=True)
+
+        if missing:
+            self.store.log(
+                "warn",
+                f"safety car: the in-game limiter is not running for {', '.join(missing)}; "
+                "holding with the restrictor instead. Is the [SCRIPT_...] entry for "
+                "/csp/vsc.lua in the server's cfg/csp_extra_options.ini? (see README)",
+            )
+
+    # -- in-game script ---------------------------------------------------
+
+    # How recently a car's script must have polled to count as running. It
+    # polls every 2 s when idle, so this allows a few missed polls.
+    CSP_SEEN_S = 10.0
+
+    def csp_checkin(self, car_id: int) -> None:
+        """A car's in-game limiter script polled /csp/state."""
+        d = self.drivers.get(car_id)
+        if d is not None:
+            self.csp_seen[car_id] = (d.guid, time.time())
+
+    def has_limiter_script(self, d: Driver) -> bool:
+        seen = self.csp_seen.get(d.car_id)
+        return (
+            seen is not None
+            and seen[0] == d.guid
+            and time.time() - seen[1] <= self.CSP_SEEN_S
+        )
 
     def csp_state(self) -> dict:
         """
@@ -1263,6 +1309,9 @@ class Engine(asyncio.DatagramProtocol):
             "drivers": [
                 dict(
                     d.to_json(),
+                    limiter_script=(
+                        self.has_limiter_script(d) if self.cfg.vsc_mode == "limiter" else None
+                    ),
                     gap_ahead=(
                         round(g, 1)
                         if (g := self.gap_ahead_seconds(d)) is not None
