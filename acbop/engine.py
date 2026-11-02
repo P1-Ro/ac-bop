@@ -571,7 +571,7 @@ class Engine(asyncio.DatagramProtocol):
         return self.cfg.floor_restrictor, self.cfg.floor_ballast
 
     def _applies_to_session(self) -> bool:
-        if self.session is None:
+        if self.session is None or not self.cfg.bop_enabled:
             return False
         t = self.session.type_name
         return (
@@ -1224,6 +1224,7 @@ class Engine(asyncio.DatagramProtocol):
     def state(self) -> dict:
         return {
             "connected": self.connected,
+            "bop_enabled": self.cfg.bop_enabled,
             "last_packet_age": (
                 round(time.time() - self.last_packet_ts, 1) if self.last_packet_ts else None
             ),

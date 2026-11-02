@@ -60,6 +60,11 @@
         title="Refit the pace model from every recorded lap and update all stored handicaps. Does not touch cars currently on track until you re-apply.">Recompute now</button>
       <button class="act" id="btn-apply"
         title="Send each driver on track their stored handicap again, without refitting anything. Use it after editing a handicap by hand, or if a driver's penalty looks out of step with what the Handicaps tab says.">Re-apply to grid</button>
+      <label class="switch" title="Master switch for BoP. Off takes every handicap off the cars on track right away and hands none out in any session. Laps are still recorded, so the model keeps learning.">
+        <input type="checkbox" id="bop-toggle" checked>
+        <span class="track"><i></i></span>
+        <span id="bop-toggle-label">BoP on</span>
+      </label>
       <span class="faint" id="recompute-msg"></span>
     </div>
 
