@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import configparser
+import os
 import sys
 import zlib
 from pathlib import Path
@@ -60,6 +61,14 @@ def welcome_setting(server_cfg: Path) -> str:
     return cp.get("SERVER", "WELCOME_MESSAGE", fallback="").strip()
 
 
+def usable_here(setting: str) -> bool:
+    """
+    A Content Manager package can carry a Windows path for the welcome
+    message, which acServer on Linux cannot open.
+    """
+    return os.name == "nt" or ("\\" not in setting and ":" not in setting)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("-s", "--server-dir", default=".", help="acServer folder (holds cfg/)")
@@ -74,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     setting = welcome_setting(server_cfg)
+    if setting and not usable_here(setting):
+        print(f"WELCOME_MESSAGE={setting} is a Windows path acServer cannot open here")
+        if args.check:
+            return 1
+        setting = ""
     welcome = server / (setting or DEFAULT_WELCOME)
     current = welcome.read_text(encoding="utf-8-sig", errors="replace") if welcome.is_file() else ""
     visible, hidden = split(current)

@@ -92,6 +92,19 @@ def main() -> int:
               and "WELCOME_MESSAGE=cfg/welcome.txt" in out,
               "without WELCOME_MESSAGE it writes cfg/welcome.txt and says to set it")
 
+        # A Content Manager package pointing at a Windows path: unusable on
+        # Linux, so it is written to cfg/welcome.txt instead.
+        if os.name != "nt":
+            (srv / "cfg" / "server_cfg.ini").write_text(
+                "[SERVER]\nWELCOME_MESSAGE=C:\\Users\\me\\welcome.txt\n"
+            )
+            code, out = run("-s", tmp, "--check")
+            check(code == 1 and "Windows path" in out, "--check flags a Windows welcome path")
+            code, out = run("-s", tmp)
+            check(code == 0 and "WELCOME_MESSAGE=cfg/welcome.txt" in out
+                  and "$CSP0:" in (srv / "cfg" / "welcome.txt").read_text(),
+                  "packing falls back to cfg/welcome.txt and says to point the server at it")
+
     failed = [m for ok, m in results if not ok]
     print("-" * 72)
     print(f"{len(results) - len(failed)}/{len(results)} checks passed")
