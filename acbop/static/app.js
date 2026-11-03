@@ -264,7 +264,7 @@ function stateCell(d, vsc) {
   if (d.limiter_script === false) {
     return pill('no SC script', 'warn',
       'Their game is not running the acbop safety car limiter, so a safety car would hold them ' +
-      'with the restrictor only. Check the [SCRIPT_...] entry in the server\'s cfg/csp_extra_options.ini.');
+      'with the restrictor only. Check the [SCRIPT_...] entry reaches players: vanilla acServer ignores cfg/csp_extra_options.ini, it has to be in the welcome message (see README).');
   }
   if (d.vsc_uses) return pill('SC used', '', 'Has already called their safety car this race');
   return pill('racing', 'ok');
@@ -714,7 +714,7 @@ const GROUPS = [
       'Keep the leading "!" — a "/" prefix would be eaten by the server as an unknown admin command.'],
     ['vsc_mode', 'How cars are held',
       '"limiter": a CSP script on every client caps held cars at the speed limit below, like a pit limiter. "restrictor": server-side only, using the restrictor as a pace limiter.',
-      'Limiter needs the script line in csp_extra_options.ini (see README) and closes gaps several times faster. Restrictor works with no client setup but tops out at 100%, roughly 20% of lap time.'],
+      'Limiter needs the script line in the server\'s CSP extra options (see README) and closes gaps several times faster. Restrictor works with no client setup but tops out at 100%, roughly 20% of lap time.'],
     ['vsc_speed_limit_kmh', 'Speed limit (km/h)',
       'Limiter mode: the speed cap for every held car.',
       'Lower closes the gap faster. Corners slower than this are unaffected, so on a tight track it needs to be lower to bite.'],

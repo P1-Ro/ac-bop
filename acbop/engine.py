@@ -1140,7 +1140,8 @@ class Engine(asyncio.DatagramProtocol):
                 "warn",
                 f"safety car: the in-game limiter is not running for {', '.join(missing)}; "
                 "holding with the restrictor instead. Is the [SCRIPT_...] entry for "
-                "/csp/vsc.lua in the server's cfg/csp_extra_options.ini? (see README)",
+                "/csp/vsc.lua in the server's welcome message? Vanilla acServer ignores "
+                "cfg/csp_extra_options.ini (see README, tools/csp_welcome.py)",
             )
 
     # -- in-game script ---------------------------------------------------
@@ -1149,11 +1150,20 @@ class Engine(asyncio.DatagramProtocol):
     # polls every 2 s when idle, so this allows a few missed polls.
     CSP_SEEN_S = 10.0
 
-    def csp_checkin(self, car_id: int) -> None:
-        """A car's in-game limiter script polled /csp/state."""
+    def csp_checkin(self, car_id: int, error: str = "") -> None:
+        """
+        A car's in-game limiter script polled /csp/state, possibly reporting
+        an error it hit in the game (it reports each new one once).
+        """
         d = self.drivers.get(car_id)
-        if d is not None:
-            self.csp_seen[car_id] = (d.guid, time.time())
+        if d is None:
+            return
+        self.csp_seen[car_id] = (d.guid, time.time())
+        if error:
+            self.store.log(
+                "warn",
+                f"limiter script error in {d.name}'s game (car {car_id}): {error}",
+            )
 
     def has_limiter_script(self, d: Driver) -> bool:
         seen = self.csp_seen.get(d.car_id)

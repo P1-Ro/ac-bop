@@ -190,9 +190,8 @@ How hard each car is held:
 
 During an online race CSP only lets a **server-provided** script touch a car's throttle
 and brakes; an app a player installs may not. So the limiter is an online script, served
-by acbop and pushed by the server to every player. Add this to the server's
-`cfg/csp_extra_options.ini` (or the CSP extra options box in Content Manager's server
-settings), with the address players can reach acbop's web port on:
+by acbop and pushed by the server to every player. Add this to the server's CSP extra
+options, with the address players can reach acbop's web port on:
 
 ```ini
 [SCRIPT_1]
@@ -201,7 +200,27 @@ REQUIRED = 1
 ```
 
 `{SessionID}` is filled in by the game with the player's slot, which is how the script
-knows which car it is; if it is not, the script asks the game for its slot itself. `REQUIRED = 1` stops anyone joining without it. The web port has to
+knows which car it is; if it is not, the script asks the game for its slot itself. `REQUIRED = 1` stops anyone joining without it.
+
+**Where the extra options go matters.** Vanilla acServer never reads
+`cfg/csp_extra_options.ini`. CSP finds its extra options hidden at the end of the
+server's welcome message, and they only get there one of two ways:
+
+- **Content Manager**: put the lines in the CSP extra options box of the server preset
+  and start the server *from Content Manager*. It packs them into the welcome message
+  each time it starts the server.
+- **Anything else** (acServer started by hand, on a dedicated box or Linux host, or by a
+  server manager): write them to `cfg/csp_extra_options.ini`, then pack them in yourself
+  from the acServer folder and restart acServer:
+
+  ```bash
+  python3 /path/to/acbop/tools/csp_welcome.py           # packs cfg/csp_extra_options.ini
+  python3 /path/to/acbop/tools/csp_welcome.py --check   # shows what players will get
+  ```
+
+If neither happened, the script never reaches anyone and the limiter does nothing; see
+[If the limiter does nothing](#if-the-limiter-does-nothing). (AssettoServer is the
+exception: it reads `cfg/csp_extra_options.ini` itself.) The web port has to
 be open to players, but only `/csp/` is reachable without the GUI password: the script
 itself, and `/csp/state`, a read-only list of who is held plus every car's ballast and
 restrictor, nothing players cannot already see in-game.
@@ -232,8 +251,8 @@ replaced by a small recorder of our own. It adds two things for drivers:
   then press any key or wheel button). It sends the same chat command, so every rule
   above still applies.
 
-The HUD finds acbop from the `[SCRIPT_...]` line above, or from an explicit entry in
-`csp_extra_options.ini`; failing both, type the address in the Safety car tab:
+The HUD finds acbop from the `[SCRIPT_...]` line above, or from an explicit entry in the
+CSP extra options; failing both, type the address in the Safety car tab:
 
 ```ini
 [ACBOP]
@@ -298,8 +317,9 @@ Matching `config.json`:
 Then open `http://<server>:8770`. Leave `web_password` empty only on a LAN or VPN.
 
 For the safety car's speed limiter, also add the script line from
-[In-game limiter](#in-game-limiter-csp) to `cfg/csp_extra_options.ini` and open the web
-port to players. Skip it and the safety car still works, held with the restrictor after a
+[In-game limiter](#in-game-limiter-csp) to the CSP extra options (through Content Manager,
+or packed into the welcome message with `tools/csp_welcome.py`) and open the web port to
+players. Skip it and the safety car still works, held with the restrictor after a
 grace period; or set `vsc_mode` to `restrictor` in the Settings tab to use that from the
 start.
 
@@ -353,9 +373,50 @@ other. There are no game clients in the demo, so nothing runs the in-game limite
 the grace period the safety net holds those cars with the restrictor, shown as
 RESTRICTED on the Live tab.
 
+## Test it on your own PC
+
+Assetto Corsa ships with its dedicated server, so acbop, the server and your game can all
+run on one machine, and acbop's defaults already match.
+
+1. `python3 run.py` and leave it running; the GUI is on http://127.0.0.1:8770.
+2. In Content Manager, Settings → Server, make a preset. Set the UDP plugin address to
+   `127.0.0.1:12000` and its local port to `11000` (or put `UDP_PLUGIN_ADDRESS` and
+   `UDP_PLUGIN_LOCAL_PORT` in the preset's `server_cfg.ini`), and add the
+   [limiter line](#in-game-limiter-csp) to its CSP extra options with `127.0.0.1` as the
+   address.
+3. Make sure `assettocorsa/server/results/` exists, start the preset from Content Manager,
+   and join it from Online → LAN.
+
+Alone you can check your handicap is applied (`!bop` in chat), laps arrive on the Live
+tab, the HUD, and that the limiter script is running (no "no SC script" pill on your car
+in the Live tab). The safety car itself needs a second driver: the caller has to be last
+and someone has to be ahead, and vanilla acServer has no AI cars.
+
+## If the limiter does nothing
+
+Work down from the server to the car:
+
+1. **Is the script reaching the game?** On the Live tab, a car with a "no SC script"
+   pill has a game that is not running it.
+   - Run `python3 tools/csp_welcome.py --check` in the acServer folder. If it says there
+     are no extra options, the server is not sending them: vanilla acServer ignores
+     `cfg/csp_extra_options.ini` (see [In-game limiter](#in-game-limiter-csp)).
+   - On the player's PC, open the `SCRIPT` address in a browser. If it does not load,
+     the address or the firewall is wrong; with `REQUIRED = 1` the game would also
+     refuse to join.
+   - The player needs CSP, recent enough for online scripts (0.1.76 or later).
+2. **Is it running but not slowing the car?** Open CSP's Lua Debug app in game: the
+   script shows its car slot, its polls to acbop, whether a safety car is running and
+   whether this car is held. If the script hits an error, it shows there too, and
+   is reported to acbop's events log as "limiter script error in …'s game", with the
+   error text.
+3. **Is the car meant to be held?** Only cars *ahead* of the caller are held, from
+   `vsc_limiter_grace_s` they are checked against the cap, and a car that never slows
+   is held with the restrictor instead (RESTRICTED on the Live tab).
+
 ## Running it for the first time
 
-1. Add the [in-game limiter](#in-game-limiter-csp) line to `csp_extra_options.ini`, and
+1. Add the [in-game limiter](#in-game-limiter-csp) line to the CSP extra options, and
    point drivers at the [HUD](#the-acbop-hud) if they want it.
 2. Start acbop, run a normal practice session, let everyone put in 10+ laps.
 3. Hit **Recompute now**. Drivers with enough clean laps flip from provisional to rated.
@@ -414,6 +475,7 @@ python3 tests/test_safetycar.py         # restrictor mode: does the caller actua
 python3 tests/test_vsc_limiter.py       # limiter mode, its safety net and /csp/ endpoints
 python3 tests/test_csp_script.py        # the in-game script under LuaJIT (needs: pip install lupa)
 python3 tests/test_hud.py               # the HUD under LuaJIT, whole app in a faked race (needs: pip install lupa)
+python3 tests/test_csp_welcome.py       # packing CSP extra options into the welcome message
 ```
 
 The Python tests spin up a fake AC server that speaks ACSP over a real UDP socket and

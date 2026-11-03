@@ -245,7 +245,9 @@ async def csp_state(request: web.Request) -> web.Response:
     except ValueError:
         car = -1
     if car >= 0:
-        engine.csp_checkin(car)
+        # An error the script hit in the game, so it shows in the events log.
+        err = "".join(ch for ch in request.query.get("err", "")[:200] if ch.isprintable())
+        engine.csp_checkin(car, err)
     return web.json_response(engine.csp_state(), headers={"Cache-Control": "no-store"})
 
 

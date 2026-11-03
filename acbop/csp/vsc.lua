@@ -3,12 +3,15 @@
 
   acbop serves this file and CSP runs it on every client, because only a
   server-provided "online script" may touch the throttle and brakes during an
-  online race; a regular app may not. Add it to the server's
-  cfg/csp_extra_options.ini:
+  online race; a regular app may not. Add it to the server's CSP extra
+  options:
 
     [SCRIPT_1]
     SCRIPT = 'http://<acbop host>:<web_port>/csp/vsc.lua?car={SessionID}'
     REQUIRED = 1
+
+  Those reach the game inside the welcome message: Content Manager puts them
+  there when it starts the server, tools/csp_welcome.py does otherwise.
 
   While a safety car is running, acbop lists the cars to hold; if this car is
   one of them its speed is capped at the announced limit, like a pit limiter.
@@ -38,6 +41,16 @@ local held = false
 local heldSince = 0
 local startSpeed = 0
 
+-- What went wrong last, if anything. Sent to acbop with the next poll so it
+-- lands in the events log, and shown in CSP's Lua Debug app.
+local lastError = nil
+local reportedError = nil
+local polls = 0
+
+local function urlEncode(text)
+  return (tostring(text):gsub('[^%w%-%._~]', function (c) return string.format('%%%02X', string.byte(c)) end))
+end
+
 local function contains(list, value)
   if type(list) ~= 'table' then return false end
   for _, v in ipairs(list) do
@@ -62,24 +75,38 @@ local function myId()
 end
 
 local function poll()
-  polling = true
   -- Saying which car we are tells acbop this script is running here.
   local id = myId()
   local url = id >= 0 and (STATE_URL .. '?car=' .. tostring(id)) or STATE_URL
-  web.get(url, function (err, response)
+  if lastError and lastError ~= reportedError and id >= 0 then
+    url = url .. '&err=' .. urlEncode(lastError:sub(1, 200))
+    reportedError = lastError
+  end
+  polling = true
+  local sent, why = pcall(web.get, url, function (err, response)
     polling = false
+    polls = polls + 1
     if err or not response or response.status ~= 200 then
       failures = failures + 1
+      ac.debug('acbop last poll', 'failed: ' .. tostring(err or (response and response.status)))
       return
     end
     local ok, data = pcall(JSON.parse, response.body)
     if ok and type(data) == 'table' then
       state = data
       failures = 0
+      ac.debug('acbop last poll', 'ok')
     else
       failures = failures + 1
+      ac.debug('acbop last poll', 'bad JSON')
     end
   end)
+  if not sent then
+    -- It never went out, so no callback will clear the flag.
+    polling = false
+    failures = failures + 1
+    error(why, 0)
+  end
 end
 
 -- Stale data must never hold a car: after a few missed polls, let go.
@@ -88,7 +115,7 @@ local function activeVsc()
   return state.vsc
 end
 
-function script.update(dt)
+local function step(dt)
   clock = clock + dt
   local vsc = activeVsc()
   if not polling and clock >= nextPoll then
@@ -98,6 +125,10 @@ function script.update(dt)
 
   local wasHeld = held
   held = vsc ~= nil and contains(vsc.held, myId())
+  ac.debug('acbop car', myId())
+  ac.debug('acbop polls', string.format('%d (%d failing)', polls, failures))
+  ac.debug('acbop safety car', vsc and 'running' or 'none')
+  ac.debug('acbop held', held)
   if not held then return end
 
   local my = ac.getCar(0)
@@ -108,6 +139,7 @@ function script.update(dt)
 
   local cap = math.max(tonumber(vsc.limit_kmh) or 100, startSpeed - DECEL_KMH_S * (clock - heldSince))
   local over = my.speedKmh - cap
+  ac.debug('acbop cap km/h', math.floor(cap + 0.5))
 
   -- Never add throttle the driver is not asking for: only ever take it away.
   if over > -THROTTLE_FADE then
@@ -117,6 +149,20 @@ function script.update(dt)
   if over > BRAKE_FROM then
     local brake = math.min(MAX_BRAKE, (over - BRAKE_FROM) / 40)
     physics.forceUserBrakesFor(0.1, math.max(my.brake, brake))
+  end
+end
+
+-- An error thrown out of script.update can stop CSP running the script, which
+-- would leave the car unlimited with nobody any the wiser. Catch it, keep
+-- polling, and tell acbop what it was.
+function script.update(dt)
+  local ok, err = pcall(step, dt)
+  if not ok then
+    if tostring(err) ~= lastError then
+      lastError = tostring(err)
+      ac.log('acbop limiter: ' .. lastError)
+    end
+    ac.debug('acbop error', lastError)
   end
 end
 

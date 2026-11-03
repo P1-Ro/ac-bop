@@ -97,7 +97,7 @@ class Config:
     # How the cars being held are slowed:
     #   "limiter"    — a CSP script on every client caps their speed at
     #                  vsc_speed_limit_kmh, like a pit limiter. acbop serves the
-    #                  script; add it to csp_extra_options.ini (see README).
+    #                  script; add it to the CSP extra options (see README).
     #   "restrictor" — server-side only, no client script: the restrictor is
     #                  used as a pace limiter. Works on any client, but 100% is
     #                  only worth about 20% of lap time, so it closes slowly.

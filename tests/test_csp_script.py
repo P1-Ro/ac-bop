@@ -42,6 +42,8 @@ ac = {
   getDriverName = function(i) return 'Me' end,
   getSim = function() return { windowWidth = 1920, windowHeight = 1080 } end,
   getUI = function() return { uiScale = 1 } end,
+  debug = function(k, v) debugged = debugged or {}; debugged[k] = tostring(v) end,
+  log = record('log'),
 }
 web = { get = function(url, cb) requested = url; pending = cb end }
 physics = { forceUserThrottleFor = record('throttle'), forceUserBrakesFor = record('brake') }
@@ -199,6 +201,67 @@ def main() -> int:
     g2.script.update(0.05)
     forced = [g2.calls[i][1] for i in range(1, len(g2.calls) + 1)]
     check("throttle" in forced, f"...and is held when that slot is listed ({forced})")
+
+    # A CSP function throwing must not kill the script: it keeps polling, the
+    # error is shown in Lua Debug and reported to acbop once with the next poll.
+    lua3 = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua3.execute(MOCKS)
+    g3 = lua3.globals()
+    g3.JSON = lua3.table_from({"parse": lambda s: lua3.table_from({
+        "vsc": lua3.table_from({"caller": 7, "held": lua3.table_from([2]), "limit_kmh": 100}),
+    })})
+    lua3.execute(
+        open(SCRIPT).read()
+        .replace("__ACBOP_STATE_URL__", "http://acbop.test:8770/csp/state")
+        .replace("__ACBOP_CAR_ID__", "2")
+    )
+    lua3.execute("physics.forceUserThrottleFor = function() error('not allowed here') end")
+    g3.car.speedKmh = 180
+    g3.script.update(0.05)
+    g3.pending(None, lua3.table_from({"status": 200, "body": "{}"}))
+    g3.pending = None
+    try:
+        g3.script.update(0.05)
+        survived = True
+    except Exception:  # noqa: BLE001
+        survived = False
+    check(survived, "an error from a CSP call is caught, not thrown out of script.update")
+    check("not allowed here" in str(g3.debugged["acbop error"]),
+          f"...shown in the Lua Debug app ({g3.debugged['acbop error']})")
+    reported = None
+    for _ in range(100):
+        g3.script.update(0.05)
+        if g3.pending is not None:
+            reported = g3.requested
+            g3.pending(None, lua3.table_from({"status": 200, "body": "{}"}))
+            g3.pending = None
+            break
+    check(reported is not None and reported.startswith("http://acbop.test:8770/csp/state?car=2&err=")
+          and "not%20allowed%20here" in reported,
+          f"...and reported to acbop with the next poll ({reported})")
+    again = None
+    for _ in range(100):
+        g3.script.update(0.05)
+        if g3.pending is not None:
+            again = g3.requested
+            break
+    check(again == "http://acbop.test:8770/csp/state?car=2",
+          f"...only once, not on every poll ({again})")
+
+    # web.get itself throwing must not leave the script waiting forever for
+    # a reply that will never come.
+    lua4 = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua4.execute(MOCKS)
+    g4 = lua4.globals()
+    lua4.execute(
+        open(SCRIPT).read()
+        .replace("__ACBOP_STATE_URL__", "http://acbop.test:8770/csp/state")
+        .replace("__ACBOP_CAR_ID__", "2")
+    )
+    lua4.execute("tries = 0; web.get = function() tries = tries + 1; error('no web') end")
+    for _ in range(100):
+        g4.script.update(0.05)
+    check(g4.tries >= 2, f"a poll that could not be sent is retried ({g4.tries} tries)")
 
     failed = [m for ok, m in results if not ok]
     print("-" * 72)

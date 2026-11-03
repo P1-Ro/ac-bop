@@ -156,6 +156,17 @@ async def main() -> int:
     check(code == 200 and flags == {0: True, 1: True, 2: True, 3: False},
           f"cars whose script polls are seen as running it, the others are not ({flags})")
 
+    # A script that hit an error in the game says so with its poll, and it
+    # lands in the events log with the driver's name.
+    code, _ = await asyncio.to_thread(
+        http_get, "/csp/state?car=1&err=attempt%20to%20call%20nil%0A%1B[x]"
+    )
+    events = [r["message"] for r in store.recent_events(20)]
+    hit = [m for m in events if "limiter script error" in m]
+    check(code == 200 and len(hit) == 1 and "attempt to call nil" in hit[0]
+          and "\x1b" not in hit[0] and "\n" not in hit[0],
+          f"a script error reported by a game is logged, control characters stripped ({hit})")
+
     srv.admin_log.clear()
     srv.chat_to_drivers.clear()
     srv.send(p_chat(3, "!vsc"))
