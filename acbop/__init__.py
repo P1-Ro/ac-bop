@@ -1,3 +1,3 @@
 """acbop — adaptive balance of performance for Assetto Corsa dedicated servers."""
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
