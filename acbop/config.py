@@ -94,16 +94,28 @@ class Config:
     # gaps, and it ends as soon as the caller has closed to the target gap.
     vsc_enabled: bool = True
     vsc_command: str = "!vsc"
-    # How the cars being held are slowed:
-    #   "limiter"    — a CSP script on every client caps their speed at
-    #                  vsc_speed_limit_kmh, like a pit limiter. acbop serves the
-    #                  script; add it to the CSP extra options (see README).
-    #   "restrictor" — server-side only, no client script: the restrictor is
-    #                  used as a pace limiter. Works on any client, but 100% is
+    # How the safety car works:
+    #   "limiter"    — a queue behind the leader. A CSP script on every client
+    #                  caps the leader at vsc_speed_limit_kmh, like a pit
+    #                  limiter; every other car runs free until it closes to
+    #                  within vsc_queue_gap_s of the car in front of it in the
+    #                  queue, and is then capped too. Ends when the whole field
+    #                  is in the queue. acbop serves the script; add it to the
+    #                  CSP extra options (see README).
+    #   "restrictor" — server-side only, no client script: the cars ahead of
+    #                  the caller are slowed with the restrictor until the
+    #                  caller has closed up. Works on any client, but 100% is
     #                  only worth about 20% of lap time, so it closes slowly.
     vsc_mode: str = "limiter"
-    # Speed cap for held cars in limiter mode.
-    vsc_speed_limit_kmh: float = 100.0
+    # Speed cap for the cars in the queue, the leader first, in limiter mode.
+    vsc_speed_limit_kmh: float = 60.0
+    # Limiter mode: a car joins the queue, and is capped, once it is this close
+    # to the car directly in front of it on track, if that car is already in
+    # the queue. Seconds at racing pace, from the driver's own lap profile.
+    vsc_queue_gap_s: float = 0.5
+    # Limiter mode: a car in the queue that drops this far behind the car in
+    # front (a spin, a trip off) is let go, so it can catch up again.
+    vsc_queue_release_s: float = 3.0
     # Safety net for limiter mode: a held car whose game has not checked in
     # with the script recently is held with the restrictor straight away. One
     # that checks in but is still more than this over the cap after the grace
@@ -111,8 +123,8 @@ class Config:
     # and is held with the restrictor too.
     vsc_limiter_tolerance_kmh: float = 15.0
     vsc_limiter_grace_s: float = 10.0
-    vsc_max_duration_s: float = 180.0  # hard ceiling even if the gap never closes
-    vsc_target_gap_s: float = 3.0      # phase ends once this close to the car ahead
+    vsc_max_duration_s: float = 300.0  # hard ceiling even if the field never closes up
+    vsc_target_gap_s: float = 3.0      # restrictor mode: ends once the caller is this close
     vsc_min_gap_s: float = 8.0         # must be this far behind to call it
     vsc_min_lap: int = 2               # not on the opening lap
     # Only the car running last on the road may call it. Applies to the admin

@@ -42,13 +42,18 @@
     <div class="sc" id="sc-banner" hidden>
       <div class="sc-head">
         <span class="sc-tag">SAFETY CAR</span>
-        <strong id="sc-caller">—</strong> is closing up
+        <strong id="sc-caller">—</strong> <span id="sc-what">is closing up</span>
         <span class="spacer"></span>
-        <span class="faint">ends under <b id="sc-target">—</b> · time left <b id="sc-remaining">—</b></span>
+        <span class="faint"><span id="sc-end-rule">ends under <b id="sc-target">—</b> · </span>time left <b id="sc-remaining">—</b></span>
         <button class="act tiny" id="btn-sc-end" title="End this safety car phase now and restore every driver's normal handicap">End now</button>
       </div>
       <div class="sc-bar"><i id="sc-fill" style="width:0%"></i></div>
-      <div class="sc-foot">
+      <div class="sc-foot" id="sc-foot-queue" hidden>
+        <span><b id="sc-queue">—</b> in line</span>
+        <span class="faint">led by <b id="sc-leader">—</b> at <b id="sc-limit">—</b></span>
+        <span class="faint">ends when everyone is in line</span>
+      </div>
+      <div class="sc-foot" id="sc-foot-gap">
         <span>gap <b id="sc-gap">—</b> <span class="faint">(was <span id="sc-start">—</span>)</span></span>
         <span class="faint">closed <b id="sc-pct">0%</b></span>
         <span class="faint">est. <b id="sc-eta">—</b> to go</span>

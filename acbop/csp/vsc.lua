@@ -13,11 +13,12 @@
   Those reach the game inside the welcome message: Content Manager puts them
   there when it starts the server, tools/csp_welcome.py does otherwise.
 
-  While a safety car is running, acbop lists the cars to hold; if this car is
-  one of them its speed is capped at the announced limit, like a pit limiter.
+  While a safety car is running, acbop lists the cars to hold: the leader,
+  and every car that has caught up and queued behind them. If this car is one
+  of them its speed is capped at the announced limit, like a pit limiter.
   Throttle is faded out approaching the cap and brakes are only added well
-  past it, so the car is eased down rather than slammed. The caller and the
-  cars behind them are never touched.
+  past it, so the car is eased down rather than slammed. Cars still catching
+  up are never touched.
 
   The two placeholders below are filled in by acbop when it serves the file.
 ]]
@@ -27,6 +28,7 @@ local MY_CAR_ID = __ACBOP_CAR_ID__ -- server slot, or -1 to find ourselves by na
 
 -- How the cap is applied.
 local DECEL_KMH_S = 12   -- the cap closes in from the speed you were doing at this rate
+local FOLLOW_KMH = 5     -- once you slow down yourself, the cap follows you down to this above
 local THROTTLE_FADE = 6  -- km/h below the cap over which throttle is faded out
 local BRAKE_FROM = 8     -- km/h over the cap before any brake is added
 local MAX_BRAKE = 0.35   -- strongest brake the limiter will ever apply
@@ -38,8 +40,7 @@ local clock = 0
 local failures = 0
 
 local held = false
-local heldSince = 0
-local startSpeed = 0
+local cap = 0
 
 -- What went wrong last, if anything. Sent to acbop with the next poll so it
 -- lands in the events log, and shown in CSP's Lua Debug app.
@@ -132,12 +133,11 @@ local function step(dt)
   if not held then return end
 
   local my = ac.getCar(0)
-  if not wasHeld then
-    heldSince = clock
-    startSpeed = my.speedKmh
-  end
-
-  local cap = math.max(tonumber(vsc.limit_kmh) or 100, startSpeed - DECEL_KMH_S * (clock - heldSince))
+  local limit = tonumber(vsc.limit_kmh) or 60
+  if not wasHeld then cap = math.max(limit, my.speedKmh) end
+  -- Close in from the speed held at, and follow a driver who brakes for the
+  -- queue themselves, so they cannot speed back up past the car in front.
+  cap = math.max(limit, math.min(cap - DECEL_KMH_S * dt, my.speedKmh + FOLLOW_KMH))
   local over = my.speedKmh - cap
   ac.debug('acbop cap km/h', math.floor(cap + 0.5))
 
@@ -171,12 +171,22 @@ function script.drawUI()
   if not vsc then return end
 
   local id = myId()
+  local limit = math.floor((tonumber(vsc.limit_kmh) or 0) + 0.5)
+  local speed = math.floor(ac.getCar(0).speedKmh + 0.5)
   local line
-  if vsc.caller == id then
+  if vsc.mode == 'limiter' then
+    local inLine = string.format('%d/%d in line', tonumber(vsc.queue) or 0, tonumber(vsc.field) or 0)
+    if held and vsc.leader == id then
+      line = string.format('YOU LEAD - LIMIT %d KM/H - you %d', limit, speed)
+    elseif held then
+      line = string.format('LIMIT %d KM/H - you %d - stay in line', limit, speed)
+    else
+      line = 'CATCH UP TO THE QUEUE - ' .. inLine
+    end
+  elseif vsc.caller == id then
     line = string.format('CATCH UP - gap %.1fs, ends under %.0fs', tonumber(vsc.gap) or 0, tonumber(vsc.target_gap) or 0)
   elseif held then
-    line = string.format('LIMIT %d KM/H - you %d', math.floor((tonumber(vsc.limit_kmh) or 0) + 0.5),
-      math.floor(ac.getCar(0).speedKmh + 0.5))
+    line = string.format('LIMIT %d KM/H - you %d', limit, speed)
   else
     line = 'Cars ahead of ' .. tostring(vsc.caller_name or '?') .. ' are limited'
   end

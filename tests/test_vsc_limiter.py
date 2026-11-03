@@ -1,11 +1,13 @@
 """
-The safety car in limiter mode: the in-game script caps held cars' speed, and
-acbop only decides who is held, publishes it, and catches any car that is
+The safety car in limiter mode: a queue behind the leader. The in-game script
+caps the queued cars' speed, and acbop only decides who is in the queue,
+publishes it, ends the phase once everyone is, and catches any car that is
 plainly not being limited.
 
 The sim plays the client script's part: a held car's speed is capped at the
-announced limit, unless it is the one car deliberately left without the
-script, which keeps racing until acbop falls back to the restrictor.
+announced limit, unless it is a car deliberately left without the script. And
+no car drives through the one in front: it slows to its speed instead, as a
+driver would.
 """
 
 from __future__ import annotations
@@ -45,23 +47,38 @@ def lap_s(s: SimDriver) -> float:
     return BASE_MS / 1000.0 * math.exp(s.skill) * (1.0 + true_loss(s))
 
 
+FOLLOW_M = 25.0  # a car this close behind another goes no faster than it
+
+
 async def drive(engine, srv, sims, seconds, limited, on_step=None) -> float:
     """Each car runs at its own pace, except that a car in `limited()` never
-    exceeds the announced speed cap, which is what the client script does."""
+    exceeds the announced speed cap, which is what the client script does,
+    and none drives through the car in front of it."""
     clock = engine_mod.time.time
     start = last = clock()
     lap_start = {c: last - lap_time_fraction(s.spline) * lap_s(s) for c, s in sims.items()}
     quiet: dict[int, float] = {}
+    speeds: dict[int, float] = {}
     while clock() - start < seconds:
         await srv.pump(0.06)
         now = clock()
         dt, last = now - last, now
+        wanted = {}
         for cid, s in sims.items():
-            free_ms = TRACK_M / (lap_s(s) * corner_shape(s.spline))   # m/s
-            speed = free_ms
+            speed = TRACK_M / (lap_s(s) * corner_shape(s.spline))   # m/s
             cap = limited(cid)
             if cap is not None:
                 speed = min(speed, cap / 3.6)
+            wanted[cid] = speed
+        for cid, s in sims.items():
+            speed = wanted[cid]
+            others = [(((o.spline - s.spline) % 1.0) * TRACK_M, oc) for oc, o in sims.items() if oc != cid]
+            dist, front = min(others)
+            if dist < FOLLOW_M:
+                speed = min(speed, speeds.get(front, wanted[front]))
+            speeds[cid] = speed
+        for cid, s in sims.items():
+            speed = speeds[cid]
             s.spline += speed * dt / TRACK_M
             if s.spline >= 1.0:
                 s.spline -= 1.0
@@ -83,8 +100,8 @@ async def main() -> int:
         server_host="127.0.0.1", server_port=12472,
         db_path=os.path.join(tmp, "lim.sqlite"),
         announce_handicaps=False, min_laps_for_rating=3,
-        vsc_mode="limiter", vsc_speed_limit_kmh=100.0,
-        vsc_target_gap_s=3.0, vsc_min_gap_s=8.0, vsc_max_duration_s=180.0,
+        vsc_mode="limiter", vsc_speed_limit_kmh=60.0,
+        vsc_queue_gap_s=0.5, vsc_min_gap_s=8.0, vsc_max_duration_s=180.0,
         vsc_tick_s=0.2, vsc_limiter_grace_s=10.0,
         web_password="secret",
     )
@@ -167,38 +184,51 @@ async def main() -> int:
           and "\x1b" not in hit[0] and "\n" not in hit[0],
           f"a script error reported by a game is logged, control characters stripped ({hit})")
 
+    # Cars 0, 2 and 3 run the script from here on; "Rogue" (car 1) never does.
     srv.admin_log.clear()
     srv.chat_to_drivers.clear()
     srv.send(p_chat(3, "!vsc"))
     await srv.pump(0.3)
     check(engine.vsc is not None, "phase started in limiter mode")
-    check(any("limited to 100 km/h" in m for m in srv.chat_to_drivers),
-          "the field is told the speed limit")
+    check(any("leader is limited to 60 km/h" in m for m in srv.chat_to_drivers),
+          "the field is told the leader is limited to 60 km/h")
 
     code, body = await asyncio.to_thread(http_get, "/csp/state")
     st = json.loads(body)
     vsc = st.get("vsc") or {}
-    check(vsc.get("caller") == 3 and vsc.get("held") == [0, 1, 2] and vsc.get("limit_kmh") == 100.0,
-          f"/csp/state names the caller and holds every car ahead at 100 km/h ({vsc})")
+    check(vsc.get("leader") == 0 and vsc.get("held") == [0] and vsc.get("limit_kmh") == 60.0
+          and vsc.get("queue") == 1 and vsc.get("field") == 4,
+          f"at the call only the leader is held, at 60 km/h ({vsc})")
 
-    # "Rogue" has no client script: it keeps racing. Everyone else obeys.
     def limited(cid):
         held = engine.vsc is not None and engine.drivers[cid].vsc_limited
         return cfg.vsc_speed_limit_kmh if held and cid != 1 else None
 
-    gaps = [engine.gap_ahead_seconds(engine.drivers[3])]
+    join_order: list[int] = []
+    join_gaps: dict[int, float] = {}
+    order0 = sorted(sims, key=lambda c: -engine.drivers[c].progress)
+    passes: list[str] = []
     touched: list[str] = []
     caller_loaded: list[str] = []
+    rogue_restricted_at: list[int] = []
 
     def step(t):
         if engine.vsc is None:
             return False
-        for c in (0, 1, 2):
-            engine.csp_checkin(c)  # the scripts keep polling
-        g = engine.gap_ahead_seconds(engine.drivers[3])
-        if g is not None:
-            gaps.append(g)
-        if sims[3].restrictor or sims[3].ballast:
+        for c in (0, 2, 3):
+            engine.csp_checkin(c)  # their scripts keep polling
+        for cid in engine.vsc.queue:
+            if cid not in join_order:
+                join_order.append(cid)
+                d = engine.drivers[cid]
+                a = engine._ahead_on_track(d, list(engine.drivers.values()))
+                join_gaps[cid] = engine._gap_on_track(d, a) if a else 0.0
+                if cid == 1:
+                    rogue_restricted_at.append(len(srv.admin_log))
+        order = sorted(sims, key=lambda c: -engine.drivers[c].progress)
+        if order != order0:
+            passes.append(str(order))
+        if 3 not in engine.vsc.queue and (sims[3].restrictor or sims[3].ballast):
             caller_loaded.append(f"{sims[3].restrictor:.0f}%/{sims[3].ballast:.0f}kg")
         for c in (0, 2):
             if (abs(sims[c].restrictor - base[c][0]) >= 1.0
@@ -206,23 +236,27 @@ async def main() -> int:
                 touched.append(f"{sims[c].name} {sims[c].restrictor:.0f}%/{sims[c].ballast:.0f}kg")
         return True
 
-    ran = await drive(engine, srv, sims, 170.0, limited, on_step=step)
-    print(f"\n  gap {gaps[0]:.1f}s -> {gaps[-1]:.1f}s in {ran:.0f}s of running")
+    ran = await drive(engine, srv, sims, 175.0, limited, on_step=step)
+    print(f"\n  queue formed in {ran:.0f}s: joined {join_order}, at gaps "
+          + ", ".join(f"{c}:{g:.2f}s" for c, g in join_gaps.items()))
 
-    check(not caller_loaded, "the caller ran unhandicapped throughout"
+    check(join_order == [0, 1, 2, 3],
+          f"the queue built from the front, each car joining behind the one before ({join_order})")
+    check(all(g <= cfg.vsc_queue_gap_s + 0.05 for c, g in join_gaps.items() if c != 0),
+          f"each car joined within {cfg.vsc_queue_gap_s}s of the car in front ({join_gaps})")
+    check(not passes, "nobody passed anybody" + (f" ({passes[:1]})" if passes else ""))
+    check(not caller_loaded, "the caller ran unhandicapped while catching up"
           + (f" ({caller_loaded[:2]})" if caller_loaded else ""))
     check(not touched, "cars obeying the limit never had their restrictor or ballast touched"
           + (f" ({touched[:2]})" if touched else ""))
-    check(sims[1].restrictor >= 99.0 or any("/restrictor 1 100" in c for c in srv.admin_log),
-          "a car that ignored the limit was caught and held with the restrictor instead")
-    check(any("not slowing" in m for m in srv.chat_to_drivers),
-          "...and was told why")
-    check(gaps[-1] <= cfg.vsc_target_gap_s + 0.5 and ran < 120,
-          f"the caller caught the pack ({gaps[0]:.1f}s -> {gaps[-1]:.1f}s in {ran:.0f}s)")
+    check(any("/restrictor 1 100" in c for c in srv.admin_log)
+          and any("limiter is not running in your game" in m for m in srv.chat_to_drivers),
+          "a car without the script was held with the restrictor as it joined, and told why")
+    check(ran < 175.0, f"the phase ended before the time limit ({ran:.0f}s)")
 
     await srv.pump(0.6)
-    check(engine.vsc is None and any("has closed" in m for m in srv.chat_to_drivers),
-          "the phase ended because the gap closed")
+    check(engine.vsc is None and any("whole field has caught up" in m for m in srv.chat_to_drivers),
+          "the phase ended because the whole field was in the queue")
     restored = all(
         abs(sims[c].restrictor - base[c][0]) < 1.0 and abs(sims[c].ballast - base[c][1]) < 2.5
         for c in (0, 1, 2)
@@ -231,6 +265,37 @@ async def main() -> int:
           "every held car released and back on its normal handicap")
     code, body = await asyncio.to_thread(http_get, "/csp/state")
     check(json.loads(body).get("vsc") is None, "/csp/state reports no safety car afterwards")
+
+    # -------------------------------------------- a leader ignoring the cap
+    # Its script checks in but it keeps racing: after the grace period it is
+    # caught by its speed and held with the restrictor.
+    cfg.vsc_min_gap_s = 0.0
+    laps = max(d.laps_done for d in engine.drivers.values())
+    for cid, sp in {0: 0.95, 1: 0.70, 2: 0.45, 3: 0.28}.items():
+        engine.drivers[cid].laps_done = laps
+        sims[cid].spline = sp
+        srv.send(p_car_update(cid, sp, 60.0))
+    await srv.pump(0.3)
+    last, leader = 3, 0
+    srv.chat_to_drivers.clear()
+    check(engine.handle_vsc(last, admin=True) is None, "a second phase can be started by an admin")
+
+    def ignoring(cid):
+        held = engine.vsc is not None and engine.drivers[cid].vsc_limited
+        return cfg.vsc_speed_limit_kmh if held and cid not in (1, leader) else None
+
+    def step2(t):
+        if engine.vsc is None:
+            return False
+        for c in sims:
+            engine.csp_checkin(c)
+        return leader not in engine.vsc.fallback
+
+    await drive(engine, srv, sims, 30.0, ignoring, on_step=step2)
+    check(engine.vsc is not None and leader in engine.vsc.fallback
+          and any("not slowing to 60" in m for m in srv.chat_to_drivers),
+          "a leader that ignores the cap is caught and held with the restrictor, and told why")
+    engine._end_vsc("test over")
 
     bg.cancel()
     transport.close()

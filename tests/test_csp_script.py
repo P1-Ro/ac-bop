@@ -202,6 +202,67 @@ def main() -> int:
     forced = [g2.calls[i][1] for i in range(1, len(g2.calls) + 1)]
     check("throttle" in forced, f"...and is held when that slot is listed ({forced})")
 
+    # The queue: a car that brakes for the car in front itself is not let
+    # back up to its old speed, and the banners speak of the queue.
+    lua5 = lupa.LuaRuntime(unpack_returned_tuples=True)
+    lua5.execute(MOCKS)
+    g5 = lua5.globals()
+    queue_state = {"vsc": {"mode": "limiter", "caller": 3, "leader": 0, "held": [0, 2],
+                           "limit_kmh": 60, "queue": 2, "field": 4}}
+    g5.JSON = lua5.table_from({"parse": lambda s: to_lua5(json.loads(s))})
+
+    def to_lua5(v):
+        if isinstance(v, dict):
+            return lua5.table_from({k: to_lua5(x) for k, x in v.items()})
+        if isinstance(v, list):
+            return lua5.table_from([to_lua5(x) for x in v])
+        return v
+
+    lua5.execute(
+        open(SCRIPT).read()
+        .replace("__ACBOP_STATE_URL__", "http://acbop.test:8770/csp/state")
+        .replace("__ACBOP_CAR_ID__", "2")
+    )
+
+    def frame5(speed, gas=1.0, brake=0.0, dt=0.05):
+        g5.car.speedKmh, g5.car.gas, g5.car.brake = speed, gas, brake
+        lua5.execute("calls = {}")
+        g5.script.update(dt)
+        if g5.pending is not None:
+            cb, g5.pending = g5.pending, None
+            cb(None, lua5.table_from({"status": 200, "body": json.dumps(queue_state)}))
+        return {g5.calls[i][1]: g5.calls[i][3] for i in range(1, len(g5.calls) + 1)}
+
+    frame5(200)
+    frame5(200)                       # joined the queue at 200 km/h
+    for _ in range(20):
+        frame5(90, gas=0, brake=0.6)  # the driver brakes for the car in front
+    out = frame5(92, gas=1)
+    check(out.get("throttle", 1) < 1,
+          f"after braking to 90 for the queue, the throttle is cut at once ({dict(out)})")
+
+    def banner5():
+        lua5.execute("calls = {}")
+        g5.script.drawUI()
+        return [g5.calls[i][2] for i in range(1, len(g5.calls) + 1) if g5.calls[i][1] == "text"]
+
+    texts = banner5()
+    check(any("LIMIT 60 KM/H" in t and "stay in line" in t for t in texts),
+          f"a queued car is told the limit and to stay in line ({texts})")
+    queue_state["vsc"]["leader"] = 2
+    for _ in range(60):
+        frame5(60)
+    texts = banner5()
+    check(any("YOU LEAD" in t for t in texts), f"the leader is told they lead ({texts})")
+    queue_state["vsc"]["held"] = [0]
+    queue_state["vsc"]["leader"] = 0
+    for _ in range(60):
+        frame5(150)
+    texts = banner5()
+    check(any("CATCH UP TO THE QUEUE - 2/4 in line" in t for t in texts),
+          f"a car still catching up is told to, with the count in line ({texts})")
+    check(frame5(150) == {}, "...and is not limited")
+
     # A CSP function throwing must not kill the script: it keeps polling, the
     # error is shown in Lua Debug and reported to acbop once with the next poll.
     lua3 = lupa.LuaRuntime(unpack_returned_tuples=True)

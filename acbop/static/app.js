@@ -240,7 +240,6 @@ $$('nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset
 // ---------------------------------------------------------------- live
 
 function stateCell(d, vsc) {
-  if (d.vsc_caller) return pill('CLOSING UP', 'vsc', 'Called the safety car — running with no handicap');
   if (d.vsc_limited) {
     const limit = vsc && vsc.limit_kmh ? `${Math.round(vsc.limit_kmh)} km/h` : 'speed cap';
     if (d.vsc_extra_restrictor > 0) {
@@ -248,8 +247,15 @@ function stateCell(d, vsc) {
         `Did not slow to the ${limit} cap, so the in-game limiter is evidently missing: ` +
         'held with the restrictor instead');
     }
+    if (vsc && vsc.leader === d.car_id) {
+      return pill(`LEADS ${limit}`, 'held', `Leads the safety car queue, held at ${limit}`);
+    }
     return pill(`LIMITED ${limit}`, 'held',
-      `Held by the in-game limiter at ${limit} until the safety car ends`);
+      `In the safety car queue, held by the in-game limiter at ${limit} until it ends`);
+  }
+  if (d.vsc_caller) return pill('CLOSING UP', 'vsc', 'Called the safety car — running with no handicap');
+  if (vsc && vsc.mode === 'limiter' && d.loaded) {
+    return pill('CATCHING UP', 'vsc', 'Not in the safety car queue yet: free to catch up to the car in front');
   }
   if (d.vsc_slowed) {
     const running = d.vsc_measured_pct === null
@@ -286,14 +292,26 @@ async function refreshLive() {
   const banner = $('#sc-banner');
   if (s.vsc) {
     banner.hidden = false;
+    const queue = s.vsc.mode === 'limiter';
     setText('#sc-caller', s.vsc.caller_name);
-    setText('#sc-gap', `${s.vsc.gap_s}s`);
-    setText('#sc-start', `${s.vsc.start_gap_s}s`);
-    setText('#sc-target', `${s.vsc.target_gap_s}s`);
-    setText('#sc-eta', s.vsc.eta === null ? '—' : `${Math.round(s.vsc.eta)}s`);
+    setText('#sc-what', queue ? 'called it: the field is queuing behind the leader' : 'is closing up');
+    $('#sc-end-rule').hidden = queue;
+    $('#sc-foot-queue').hidden = !queue;
+    $('#sc-foot-gap').hidden = queue;
     setText('#sc-remaining', `${Math.round(s.vsc.remaining)}s`);
-    $('#sc-fill').style.width = `${s.vsc.closed_pct}%`;
-    setText('#sc-pct', `${s.vsc.closed_pct}%`);
+    if (queue) {
+      setText('#sc-queue', `${s.vsc.queue}/${s.vsc.field}`);
+      setText('#sc-leader', s.vsc.leader_name);
+      setText('#sc-limit', `${Math.round(s.vsc.limit_kmh)} km/h`);
+      $('#sc-fill').style.width = `${s.vsc.field ? Math.round(s.vsc.queue / s.vsc.field * 100) : 0}%`;
+    } else {
+      setText('#sc-gap', `${s.vsc.gap_s}s`);
+      setText('#sc-start', `${s.vsc.start_gap_s}s`);
+      setText('#sc-target', `${s.vsc.target_gap_s}s`);
+      setText('#sc-eta', s.vsc.eta === null ? '—' : `${Math.round(s.vsc.eta)}s`);
+      $('#sc-fill').style.width = `${s.vsc.closed_pct}%`;
+      setText('#sc-pct', `${s.vsc.closed_pct}%`);
+    }
   } else {
     banner.hidden = true;
   }
@@ -712,27 +730,33 @@ const GROUPS = [
     ['vsc_command', 'Chat command',
       'What a driver types in chat to call one. The CMRT HUD button sends this too.',
       'Keep the leading "!" — a "/" prefix would be eaten by the server as an unknown admin command.'],
-    ['vsc_mode', 'How cars are held',
-      '"limiter": a CSP script on every client caps held cars at the speed limit below, like a pit limiter. "restrictor": server-side only, using the restrictor as a pace limiter.',
-      'Limiter needs the script line in the server\'s CSP extra options (see README) and closes gaps several times faster. Restrictor works with no client setup but tops out at 100%, roughly 20% of lap time.'],
+    ['vsc_mode', 'How it works',
+      '"limiter": a queue. The leader is capped at the speed limit below by a CSP script on every client, everyone else catches up and is capped too once they reach the car in front; it ends when the whole field is in line. "restrictor": server-side only, the cars ahead of the caller are slowed with the restrictor until the caller has closed up.',
+      'Limiter needs the script line in the server\'s CSP extra options (see README). Restrictor works with no client setup but tops out at 100%, roughly 20% of lap time, so it closes gaps slowly.'],
     ['vsc_speed_limit_kmh', 'Speed limit (km/h)',
-      'Limiter mode: the speed cap for every held car.',
-      'Lower closes the gap faster. Corners slower than this are unaffected, so on a tight track it needs to be lower to bite.'],
+      'Limiter mode: the speed cap for the leader and every car queued behind them.',
+      'Lower brings the field together faster. Corners slower than this are unaffected.'],
+    ['vsc_queue_gap_s', 'Join the queue within (s)',
+      'Limiter mode: a car is capped once it is this close to the car in front of it, if that car is already in the queue.',
+      'Seconds at racing pace, so 0.5 is a few car lengths on a straight. Larger caps cars sooner but leaves gaps in the line.'],
+    ['vsc_queue_release_s', 'Let go after dropping back (s)',
+      'Limiter mode: a queued car that falls this far behind the car in front (a spin, a trip off) is let go to catch up again.',
+      'Too small and a car is let go for braking a little early into a corner.'],
     ['vsc_limiter_tolerance_kmh', 'Limiter tolerance (km/h)',
       'Limiter mode: a held car still this far over the cap after the grace period, for 3 seconds, is held with the restrictor instead.',
       'The safety net for a driver without the client script. Too low and a car over a crest could trip it.'],
     ['vsc_limiter_grace_s', 'Limiter grace (s)',
-      'Limiter mode: how long held cars get to slow down before the safety net checks them.',
+      'Limiter mode: how long a car gets to slow down after joining the queue before the safety net checks it (longer if it joined fast).',
       'The in-game limiter eases cars down at about 12 km/h per second, so allow for the fastest straight.'],
     ['vsc_max_slowdown', 'Hold strength',
       'How much slower than the caller the held cars are limited to, as a fraction of the caller’s own unhandicapped lap time. 0.6 means a lap 60% slower.',
       'This is the main lever on how fast the field comes back together: 0.6 closes about 0.37s of gap per second of running, so a 20s gap takes roughly 50s. Higher closes faster but the held cars crawl.'],
     ['vsc_target_gap_s', 'End when gap under (s)',
-      'The phase ends as soon as the caller is this close to the car ahead.',
+      'Restrictor mode: the phase ends as soon as the caller is this close to the car ahead.',
       'Lower means the caller is brought right onto the back of the car ahead; higher ends it sooner.'],
     ['vsc_max_duration_s', 'Hard time limit (s)',
-      'The phase always ends after this long, even if the gap never closed.',
-      'A safety net for the case where the caller is so far back the gap cannot be closed.'],
+      'The phase always ends after this long, even if the field never closed up.',
+      'A safety net for a car so far back (or a lap down) that it cannot catch the queue in time. With the queue at 60 km/h, a field spread over most of a lap takes two to three minutes.'],
     ['vsc_min_gap_s', 'Min gap to call (s)',
       'A driver must be at least this far behind the car ahead to call one.',
       'This is what stops it being used as push-to-pass in a close fight.'],

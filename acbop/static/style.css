@@ -320,3 +320,6 @@ table.log tr.warn td { color: var(--accent); }
   .toast { animation: none; }
   .toast.leaving { transition: none; }
 }
+
+/* .sc-foot and friends set display, which would otherwise beat the hidden attribute */
+[hidden] { display: none !important; }

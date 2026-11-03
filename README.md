@@ -2,7 +2,8 @@
 
 A server-side plugin that learns how quick each driver is and hands out ballast and
 restrictor so a mixed-ability group races together. Plus a once-per-race virtual safety
-car for anyone who gets dropped: the cars ahead are speed-limited until they catch up.
+car for anyone who gets dropped: the leader is held at 60 km/h and the whole field queues
+up behind them.
 
 Drivers install nothing by hand. The safety car's speed limiter is a small CSP script the
 server pushes to every player's game; the only requirement is CSP, which most players
@@ -92,31 +93,39 @@ a funnel accounting for every single recorded lap so nothing can go missing quie
 
 Vanilla acServer has no safety car and no speed limiter, and the plugin protocol cannot
 set one: the only levers a server plugin has are `/ballast` and `/restrictor`. So there
-are two ways to hold the cars ahead, chosen with `vsc_mode`:
+are two kinds of safety car, chosen with `vsc_mode`:
 
-- **`limiter`** (default): a real speed cap, like a pit limiter. acbop serves a small
-  CSP script that the server pushes to every player's game, and that script holds the
-  car at `vsc_speed_limit_kmh` while it is being held. See
-  [In-game limiter](#in-game-limiter-csp) for the one-line server setup. A car that
-  plainly is not being limited (no CSP, script missing) is caught after a grace period
-  and held with the restrictor instead.
-- **`restrictor`**: no client setup at all. The restrictor alone is used as a pace
-  limiter, described below. It never adds ballast, but a vanilla server caps it at 100%,
-  which is only worth about 20% of lap time, so it closes gaps several times more slowly.
+- **`limiter`** (default): a queue behind the leader, with a real speed cap like a pit
+  limiter. acbop serves a small CSP script that the server pushes to every player's game,
+  and that script caps the car at `vsc_speed_limit_kmh` while it is in the queue. See
+  [In-game limiter](#in-game-limiter-csp) for the server setup. A car that plainly is not
+  being limited (no CSP, script missing) is held with the restrictor instead.
+- **`restrictor`**: no client setup at all. The cars ahead of the caller are slowed with
+  the restrictor until the caller has closed up, described below. It never adds ballast,
+  but a vanilla server caps it at 100%, which is only worth about 20% of lap time, so it
+  closes gaps several times more slowly.
 
 Everyone carries a **floor** (default 6% / 25 kg), which leaves headroom to go *down*:
 the caller drops it.
 
-Typing `!vsc` (or pressing the bound button in the acbop HUD) starts a live phase:
+Typing `!vsc` (or pressing the bound button in the acbop HUD) starts a live phase. The
+**caller** runs with no handicap at all until it ends. In limiter mode:
 
-- the **caller** runs with no handicap at all
-- every car **ahead** is held: capped at `vsc_speed_limit_kmh` in limiter mode, or in
-  restrictor mode limited to the same target lap time, the caller's own unhandicapped
-  pace × (1 + `vsc_max_slowdown`)
-- gaps are re-measured every second and the whole thing is recomputed from live
-  positions
-- it ends once the caller has stayed within `vsc_target_gap_s` of the car ahead for two
-  seconds, or at the hard time limit (`vsc_max_duration_s`, default 180 s)
+- the **leader** is capped at `vsc_speed_limit_kmh` (default 60 km/h) straight away
+- every other car runs free until it is within `vsc_queue_gap_s` (default 0.5 s) of the
+  car physically in front of it, *and* that car is already in the queue; from then on it
+  is capped too. So the queue builds from the front, one car at a time, and nobody can
+  pull away from it
+- a queued car that drops more than `vsc_queue_release_s` (3 s) behind the car in front,
+  after a spin say, is let go so it can catch up again
+- it ends once the **whole field** has been in the queue for two seconds, or at the hard
+  time limit (`vsc_max_duration_s`, default 300 s)
+
+In restrictor mode every car **ahead** of the caller is limited to the same target lap
+time, the caller's own unhandicapped pace × (1 + `vsc_max_slowdown`), and it ends once
+the caller has stayed within `vsc_target_gap_s` of the car ahead for two seconds, or at
+the time limit. Either way, positions are re-measured every second and the whole thing
+is recomputed from them.
 
 Only the car running **last** may call it (`vsc_last_place_only`, on by default; the
 GUI's admin button follows the same rule). Also refused if: they are leading, the car ahead is closer than `vsc_min_gap_s` (stops it
@@ -133,20 +142,22 @@ Other chat commands: `!bop` shows your handicap, `!gap` the gap ahead, `!help` l
 
 #### Limiter mode
 
-Held cars are capped at `vsc_speed_limit_kmh` (default 100 km/h) by the
+Queued cars are capped at `vsc_speed_limit_kmh` (default 60 km/h) by the
 [in-game limiter](#in-game-limiter-csp). Corners slower than the cap are unaffected, so the
-caller gains mostly on the straights; in the test, a 22-second gap closed in 37 seconds.
-The banner's ETA is measured from the gap actually closed so far, since a speed cap has
-no formula for it.
+cars behind gain mostly on the straights. Gaps are measured to the car physically in front
+on the road, in seconds at racing pace, so a lapped car that happens to be right behind
+the leader queues there. In the test, four cars spread over two-thirds of a lap were all
+in line in about two and a half minutes. The Live tab's banner shows how many cars are
+in line, and each car's state: LEADS, LIMITED, or CATCHING UP.
 
 The safety net: the script checks in with acbop every couple of seconds, so acbop knows
 which games are running it. A held car whose game has not checked in is held at 100%
 restrictor straight away, and the events log says the script is not running for it.
 A car that checks in but still runs more than `vsc_limiter_tolerance_kmh` (15) over the
-cap after `vsc_limiter_grace_s` (10 s), for three seconds running, is caught the same
-way. Either way the driver is told why in chat and flagged on the Live tab. 100%
+cap after `vsc_limiter_grace_s` (10 s) in the queue, for three seconds running, is caught
+the same way; a car that joined the queue fast gets longer, as the script eases it down. Either way the driver is told why in chat and flagged on the Live tab. 100%
 restrictor is only worth about 20% of lap time, so this is a backstop, not a substitute:
-**without the `[SCRIPT_…]` entry below, the cars ahead are barely slowed at all.** The
+**without the `[SCRIPT_…]` entry below, the queue is barely slowed at all.** The
 Live tab shows a "no SC script" pill on every car whose game is not running it, so you
 can see that before anyone calls a safety car.
 
@@ -227,10 +238,12 @@ restrictor, nothing players cannot already see in-game.
 
 While a car is held, the script lifts the throttle as it approaches the cap and adds a
 gentle brake (at most 35%) only well past it. The cap closes in from the car's own
-speed at 12 km/h per second, so nobody is slammed down from top speed. It never adds
-throttle the driver is not asking for, and never touches the caller or the cars behind
-them. A yellow "VIRTUAL SAFETY CAR" banner tells each driver the limit, or tells the
-caller to catch up. If acbop stops answering for a few seconds, the script lets go.
+speed at 12 km/h per second, so nobody is slammed down from top speed, and it follows a
+driver who brakes for the queue themselves, so they cannot speed back up into the car
+in front. It never adds throttle the driver is not asking for, and never touches a car
+still catching up. A yellow "VIRTUAL SAFETY CAR" banner tells the leader and the queued
+cars the limit, and everyone else to catch up to the queue, with how many are in line.
+If acbop stops answering for a few seconds, the script lets go.
 
 Using the CSP physics functions marks the lap invalid, which is fine: laps under a safety
 car are excluded anyway.
@@ -245,8 +258,8 @@ gone; the deltabar's lap recording, which the leaderboard needs for intervals, i
 replaced by a small recorder of our own. It adds two things for drivers:
 
 - The **leaderboard** shows each driver's ballast and restrictor, from acbop, next to
-  their name. While a safety car runs, held cars are shown in yellow, the caller in
-  green, and the flag area reads VIRTUAL SAFETY CAR.
+  their name. While a safety car runs, held (queued) cars are shown in yellow, the caller
+  in green, and the flag area reads VIRTUAL SAFETY CAR.
 - A **rebindable button** calls a safety car (Settings → Safety car tab: click the box,
   then press any key or wheel button). It sends the same chat command, so every rule
   above still applies.
@@ -410,9 +423,10 @@ Work down from the server to the car:
    whether this car is held. If the script hits an error, it shows there too, and
    is reported to acbop's events log as "limiter script error in …'s game", with the
    error text.
-3. **Is the car meant to be held?** Only cars *ahead* of the caller are held, from
-   `vsc_limiter_grace_s` they are checked against the cap, and a car that never slows
-   is held with the restrictor instead (RESTRICTED on the Live tab).
+3. **Is the car meant to be held?** Only the leader and the cars that have queued up
+   behind them are held (LEADS and LIMITED on the Live tab); a car still CATCHING UP is
+   free. After `vsc_limiter_grace_s` in the queue they are checked against the cap, and
+   a car that never slows is held with the restrictor instead (RESTRICTED).
 
 ## Running it for the first time
 
@@ -432,9 +446,10 @@ maximum (unfair to a slow one).
 ## The GUI
 
 - **Live** — grid with lap times, gaps, current ballast and restrictor, and safety car
-  state: the caller, cars LIMITED by the in-game limiter, and any RESTRICTED by the
-  safety net. A live banner tracks a running phase with a closure bar and an ETA, and can
-  end it early. Recompute and re-apply on demand; `safety car` starts a phase manually,
+  state: the caller, the leader and the cars LIMITED in the queue, those still CATCHING
+  UP, and any RESTRICTED by the safety net. A live banner tracks a running phase (how
+  many cars are in line, or in restrictor mode a closure bar and an ETA), and can end it
+  early. Recompute and re-apply on demand; `safety car` starts a phase manually,
   ignoring the per-race budget. After a recompute, a funnel accounts for every recorded
   lap — nothing is dropped without being shown.
 - **Drivers** — pace relative to the field with the handicap removed. Toggle anyone out
@@ -509,10 +524,13 @@ caller genuinely closes:
  gap 17.0s -> 3.0s in 98s of running   (predicted ETA was 101s)
 ```
 
-The limiter test plays the client script's part, capping held cars at 100 km/h, and
-leaves one car without it. That car is caught and restricted, nobody else's ballast or
-restrictor is touched, and the caller closes 22.5 s to under 3 s in 37 s. It also checks
-that `/csp/` is reachable without the GUI password while the admin API is not.
+The limiter test plays the client script's part, capping queued cars at 60 km/h, and no
+simulated car drives through the one in front. Four cars spread over two-thirds of a lap
+queue up behind the leader in order, each joining within 0.5 s of the car in front,
+nobody passes anybody, and the phase ends once all four are in line. One car has no
+script and is restricted as it joins; nobody else's ballast or restrictor is touched. A
+second phase checks that a leader ignoring the cap is caught by its speed. It also
+checks that `/csp/` is reachable without the GUI password while the admin API is not.
 
 ---
 
@@ -541,7 +559,7 @@ to disable the term.
 
 **Admin penalties pop a notification** for the affected driver. The deadband settings
 stop acbop resending unchanged values, which keeps this to once per session per driver
-in normal running. In limiter mode a safety car sends no penalties to held cars at all,
+in normal running. In limiter mode a safety car sends no penalties to queued cars at all,
 only the caller's handicap being dropped and restored. In restrictor mode the held cars
 see a few notifications as the hold settles; `vsc_deadband_restrictor` (default 3%) stops
 it resending small corrections, and raising it or `vsc_tick_s` cuts them further.
